@@ -1,4 +1,5 @@
-/* SOC Shift engine: scenario loading, detections, correlations, pivots, response, tuning, handover, grading.
+/* SOC Shift engine: scenario loading, seeded variants, detections, correlations, pivots, response, tuning, handover,
+   grading, shift metrics and case exports (TheHive, DFIR-IRIS, STIX 2.1, ATT&CK Navigator).
    Pure functions over a loaded scenario + Sigma (vendor/sigma.js). Runs in the browser (window.SOC)
    and in node (require), so the tests and the scenario validator use the same code as the page. */
 (function (root) {
@@ -118,6 +119,14 @@
         var a = alerts[key] || (alerts[key] = { id: key, ruleId: c.def.id, platform: c.def.platform, key: gk, title: c.rule.title, level: c.rule.level, attack: attackOf(c.rule.tags), description: c.rule.description, falsepositives: [].concat(c.rule.falsepositives || []), events: [], first: ev._t, last: ev._t, at: ev._t, kind: "sigma" });
         a.events.push(ev._id); if (ev._t < a.first) a.first = ev._t; if (ev._t > a.last) a.last = ev._t;
       });
+    });
+    // Pipeline latency: a Sigma alert lands after its first event by its platform's delay from the scenario
+    // (alertDelayMinutes, or delayMinutes on the rule). Correlations fire at the event that completes them.
+    var delays = data.alertDelayMinutes || {}, defs = {};
+    compiled.forEach(function (c) { defs[c.def.id] = c.def; });
+    Object.keys(alerts).forEach(function (k) {
+      var a = alerts[k], r = defs[a.ruleId] || {}, d = r.delayMinutes != null ? +r.delayMinutes : +(delays[a.platform] || 0);
+      if (d > 0) a.at = new Date(Date.parse(normTime(a.first)) + d * 60000).toISOString().replace(".000Z", "Z");
     });
     correlate(data, from).forEach(function (a) { alerts[a.id] = a; });
     return Object.keys(alerts).map(function (k) { return alerts[k]; }).sort(function (a, b) { return a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1; });
@@ -424,14 +433,276 @@
     }).join("\n") + "\n";
   }
 
+  /* ---------- shift timing: MTTD, MTTA, MTTR ----------
+     Per alert, from the shift's own timestamps:
+       time to detect      = alert time - first matching event time
+       time to acknowledge = first time the alert was opened in the queue - alert time
+       time to resolve     = verdict time - alert time
+     Per incident: time to first response = first completed response action - earliest linked alert time.
+     Means and nearest-rank medians are over the alerts that have both timestamps. */
+  function mins(a, b) { if (!a || !b) return null; var d = (Date.parse(normTime(b)) - Date.parse(normTime(a))) / 60000; return isFinite(d) ? Math.max(0, d) : null; }
+  function summary(list) {
+    var s = list.filter(function (x) { return x !== null; }).sort(function (a, b) { return a - b; });
+    if (!s.length) return { n: 0, mean: null, median: null, p90: null };
+    var mean = s.reduce(function (t, x) { return t + x; }, 0) / s.length;
+    return { n: s.length, mean: Math.round(mean * 10) / 10, median: s[Math.ceil(0.5 * s.length) - 1], p90: s[Math.ceil(0.9 * s.length) - 1] };
+  }
+  function shiftMetrics(state, alerts) {
+    var acks = state.acks || {}, byAlert = {};
+    alerts.forEach(function (a) { byAlert[a.id] = a; });
+    var rows = alerts.map(function (a) {
+      var v = state.verdicts[a.id];
+      return { id: a.id, ttd: mins(a.first, a.at), tta: mins(a.at, acks[a.id]), ttr: v ? mins(a.at, v.at) : null };
+    });
+    var incidents = Object.keys(state.incidents).map(function (k) {
+      var i = state.incidents[k], first = null;
+      i.alerts.forEach(function (id) { var a = byAlert[id]; if (a && (!first || a.at < first)) first = a.at; });
+      var done = state.actions.filter(function (x) { return x.caseId === i.id && x.status === "done"; }).map(function (x) { return x.doneAt || x.at; }).sort()[0] || null;
+      return { id: i.id, ttrespond: first && done ? mins(first, done) : null };
+    });
+    return { rows: rows, mttd: summary(rows.map(function (r) { return r.ttd; })), mtta: summary(rows.map(function (r) { return r.tta; })), mttr: summary(rows.map(function (r) { return r.ttr; })),
+      incidents: incidents, mttrespond: summary(incidents.map(function (r) { return r.ttrespond; })) };
+  }
+
+  /* ---------- observables with IOC flag, TLP and PAP ----------
+     TLP 2.0 and PAP levels as TheHive 5 stores them (0 CLEAR, 1 GREEN, 2 AMBER, 3 RED; TLP 4 AMBER+STRICT).
+     Defaults come from the scenario's "observables" block: attacker-side values are IOCs at TLP:GREEN / PAP:AMBER,
+     internal people, hosts, sessions and keys are TLP:AMBER+STRICT / PAP:RED and never IOCs. */
+  var TLP = { CLEAR: 0, GREEN: 1, AMBER: 2, RED: 3, "AMBER+STRICT": 4 };
+  var PAP = { CLEAR: 0, GREEN: 1, AMBER: 2, RED: 3 };
+  var OBS_DEFAULTS = { external: { tlp: "GREEN", pap: "AMBER" }, internal: { tlp: "AMBER+STRICT", pap: "RED" } };
+  // TheHive 5 default observable types; DFIR-IRIS default IOC and asset type ids (a fresh install; check yours under Manage).
+  var HIVE_TYPE = { ip: "ip", domain: "domain", host: "hostname", user: "other", customer: "other", session: "other", cloudkey: "other", package: "other", file: "filename", url: "url", hash: "hash" };
+  var IRIS_IOC = { ip: { id: 79, name: "ip-src" }, domain: { id: 20, name: "domain" }, file: { id: 37, name: "filename" }, url: { id: 141, name: "url" }, hash: { id: 113, name: "sha256" }, package: { id: 96, name: "other" } };
+  var IRIS_ASSET = { account: 1, linux: 4, mac: 6, windows: 9 };
+  var IRIS_TLP = { RED: 1, AMBER: 2, GREEN: 3, CLEAR: 4, "AMBER+STRICT": 5 };
+  function ipInt(ip) { return String(ip).split(".").reduce(function (n, o) { return n * 256 + +o; }, 0); }
+  function inCidr(ip, cidr) { var p = String(cidr).split("/"), size = Math.pow(2, 32 - +(p[1] || 32)), b = ipInt(p[0]), v = ipInt(ip); return v >= b && v < b + size; }
+  function isInternalIp(ip, data) {
+    if (["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "127.0.0.0/8"].some(function (c) { return inCidr(ip, c); })) return true;
+    return (data.estate.corpEgress || []).some(function (c) { return inCidr(ip, c); });
+  }
+  // Attacker-side by default; observables.notIoc lists well-known services and internal documents that are never IOCs.
+  function isExternal(e, data) {
+    var known = (data.observables && data.observables.notIoc) || [];
+    if (known.some(function (k) { return e.value === k || (e.type === "domain" && e.value.slice(-k.length - 1) === "." + k); })) return false;
+    if (e.type === "ip") return !isInternalIp(e.value, data);
+    if (e.type === "domain") return !(data.estate.apps || {})[e.value];
+    return e.type === "package" || e.type === "file" || e.type === "url" || e.type === "hash";
+  }
+  function observables(state, incident, alerts, data) {
+    var evmap = byId(data), seen = {}, out = [], over = state.obs || {}, NOISY = {}, cfg = data.observables || {};
+    (data.noisyEntities || []).forEach(function (v) { NOISY[v] = 1; });
+    var ext = cfg.external || OBS_DEFAULTS.external, inn = cfg.internal || OBS_DEFAULTS.internal;
+    var byAlert = {}; alerts.forEach(function (a) { byAlert[a.id] = a; });
+    function make(e, first, last, count, alertIds) {
+      var x = isExternal(e, data), o = over[e.type + ":" + e.value] || {}, d = x ? ext : inn;
+      return { type: e.type, value: e.value, ioc: o.ioc !== undefined ? !!o.ioc : x, tlp: o.tlp || d.tlp, pap: o.pap || d.pap, first: first, last: last, count: count, alerts: alertIds };
+    }
+    incident.alerts.forEach(function (id) {
+      var a = byAlert[id]; if (!a) return;
+      alertEntities(a, evmap).forEach(function (e) {
+        var k = e.type + ":" + e.value; if (seen[k] || NOISY[e.value]) return;
+        var times = a.events.map(function (x) { return evmap[x]; }).filter(function (ev) { return (ev._ents || entitiesOf(ev)).some(function (y) { return y.type === e.type && y.value === e.value; }); }).map(function (ev) { return ev._t; }).sort();
+        seen[k] = make(e, times[0] || a.first, times[times.length - 1] || a.last, times.length, [a.id]);
+        out.push(seen[k]);
+      });
+    });
+    // Events the analyst attached from a hunt (incident.extra) carry observables too.
+    (incident.extra || []).forEach(function (eid) {
+      var ev = evmap[eid]; if (!ev) return;
+      (ev._ents || entitiesOf(ev)).forEach(function (e) {
+        var k = e.type + ":" + e.value, o = seen[k];
+        if (NOISY[e.value]) return;
+        if (o) { o.count++; if (ev._t < o.first) o.first = ev._t; if (ev._t > o.last) o.last = ev._t; return; }
+        seen[k] = make(e, ev._t, ev._t, 1, []);
+        out.push(seen[k]);
+      });
+    });
+    incident.alerts.forEach(function (id) {
+      var a = byAlert[id]; if (!a) return;
+      var ents = alertEntities(a, evmap);
+      out.forEach(function (o) { if (o.alerts.indexOf(id) < 0 && ents.some(function (e) { return e.type === o.type && e.value === o.value; })) o.alerts.push(id); });
+    });
+    return out;
+  }
+
+  /* ---------- case exports ---------- */
+  function ms(t) { return Date.parse(normTime(t)); }
+  var HIVE_SEV = { info: 1, low: 1, medium: 2, high: 3, critical: 4 };
+  function tagsOf(o) { return ["soc-shift:entity=" + o.type].concat(o.alerts.map(function (a) { return "soc-shift:alert=" + a; })); }
+  function hiveObservable(o) {
+    return { dataType: HIVE_TYPE[o.type] || "other", data: o.value, message: o.type + " seen in " + o.count + " event" + (o.count === 1 ? "" : "s") + ", first " + normTime(o.first),
+      tlp: TLP[o.tlp], pap: PAP[o.pap], ioc: !!o.ioc, sighted: true, sightedAt: ms(o.first), tags: tagsOf(o) };
+  }
+  // TheHive 5 InputAlert (POST /api/v1/alert) for one alert, and InputCase (POST /api/v1/case) with its observables, alerts and
+  // ATT&CK procedures for one incident. Field names and types follow thehive4py 2.x types/alert.py, case.py, observable.py, task.py, procedure.py.
+  function theHiveAlert(state, alert, data, obs) {
+    var v = state.verdicts[alert.id] || {};
+    return { type: "soc-shift", source: alert.platform, sourceRef: alert.id, title: alert.title + " on " + alert.key, description: (alert.description || alert.title) + (v.reason ? "\n\nAnalyst: " + v.reason : ""),
+      severity: HIVE_SEV[v.sev || alert.level] || 2, date: ms(alert.at), tags: ["rule:" + alert.ruleId].concat(alert.attack.map(function (t) { return "mitre:" + t; })), tlp: TLP.AMBER, pap: PAP.AMBER,
+      observables: (obs || []).filter(function (o) { return o.alerts.indexOf(alert.id) >= 0; }).map(hiveObservable),
+      procedures: alert.attack.map(function (t) { return { patternId: t, occurDate: ms(alert.first), description: alert.title }; }) };
+  }
+  function theHiveCase(state, incident, alerts, data) {
+    var obs = observables(state, incident, alerts, data), linked = alerts.filter(function (a) { return incident.alerts.indexOf(a.id) >= 0; });
+    var start = linked.map(function (a) { return a.first; }).sort()[0];
+    var acts = state.actions.filter(function (x) { return x.caseId === incident.id; });
+    var c = { title: incident.id + " " + incident.title, description: (incident.summary || incident.title) + (incident.next ? "\n\nNext action: " + incident.next : "") + (incident.owner ? "\nOwner: " + incident.owner + (incident.due ? ", due " + incident.due : "") : ""),
+      severity: HIVE_SEV[incident.severity] || 2, tags: ["soc-shift:incident=" + incident.id, "soc-shift:scenario=" + data.id], tlp: TLP.AMBER, pap: PAP.AMBER, flag: incident.severity === "critical",
+      tasks: acts.map(function (x, i) { return { title: x.label + " on " + x.entity, group: x.platform || "response", description: x.effect || "", status: x.status === "done" ? "Completed" : "Waiting", order: i }; }) };
+    if (start) c.startDate = ms(start);
+    return { "case": c, observables: obs.map(hiveObservable), alerts: linked.map(function (a) { return theHiveAlert(state, a, data, obs); }),
+      procedures: [].concat.apply([], linked.map(function (a) { return a.attack.map(function (t) { return { patternId: t, occurDate: ms(a.first), description: a.id }; }); })) };
+  }
+  // DFIR-IRIS alert (POST /api/v2/alerts, formerly /alerts/add) per alert. Column names from iris-backend app/models/alerts.py,
+  // IOC and asset fields from IocSchema and CaseAssetsSchema (ioc_value required; asset_name and asset_type_id required).
+  var IRIS_SEV = { info: 2, low: 3, medium: 4, high: 5, critical: 6 };
+  function irisAssetType(o, data) {
+    if (o.type === "user") return IRIS_ASSET.account;
+    var os = String(((data.estate.hosts || {})[o.value] || {}).os || "");
+    return /mac/i.test(os) ? IRIS_ASSET.mac : /linux/i.test(os) ? IRIS_ASSET.linux : IRIS_ASSET.windows;
+  }
+  function irisAlert(state, alert, data, obs, customerId) {
+    var v = state.verdicts[alert.id] || {}, mine = (obs || []).filter(function (o) { return o.alerts.indexOf(alert.id) >= 0; });
+    return { alert_title: alert.title + " on " + alert.key, alert_description: alert.description || alert.title, alert_source: alert.platform, alert_source_ref: alert.id,
+      alert_source_event_time: normTime(alert.first), alert_severity_id: IRIS_SEV[v.sev || alert.level] || 4, alert_status_id: v.verdict ? 6 : 2, alert_customer_id: customerId || 1,
+      alert_note: v.reason || "", alert_tags: ["rule:" + alert.ruleId].concat(alert.attack).join(","),
+      alert_context: { rule: alert.ruleId, techniques: alert.attack, verdict: v.verdict || null, incident: v.incident || null, events: alert.events.length },
+      alert_iocs: mine.filter(function (o) { return o.ioc && IRIS_IOC[o.type]; }).map(function (o) { return { ioc_value: o.value, ioc_type_id: IRIS_IOC[o.type].id, ioc_tlp_id: IRIS_TLP[o.tlp], ioc_description: o.type + " (" + IRIS_IOC[o.type].name + "), " + o.count + " events", ioc_tags: tagsOf(o).join(",") }; }),
+      alert_assets: mine.filter(function (o) { return o.type === "host" || o.type === "user"; }).map(function (o) { return { asset_name: o.value, asset_type_id: irisAssetType(o, data), asset_description: o.type, asset_tags: "soc-shift:entity=" + o.type }; }) };
+  }
+  // STIX 2.1 bundle: the SOC as an identity, one indicator and one sighting per IOC observable, ATT&CK attack-patterns with
+  // "indicates" relationships. Ids are deterministic in UUIDv4 form (STIX 2.1 asks for v4 on SDOs and SROs), hashed from content.
+  function hex(str) { var h2 = 0x01000193, out = ""; for (var r = 0; r < 4; r++) { var x = 0x811c9dc5 ^ r; for (var i = 0; i < str.length; i++) { x ^= str.charCodeAt(i); x = Math.imul(x, h2) >>> 0; } out += ("00000000" + x.toString(16)).slice(-8); } return out; }
+  function sid(type, key) { var x = hex(type + "|" + key); return type + "--" + x.slice(0, 8) + "-" + x.slice(8, 12) + "-4" + x.slice(13, 16) + "-" + ((parseInt(x[16], 16) & 3) | 8).toString(16) + x.slice(17, 20) + "-" + x.slice(20, 32); }
+  function stixTime(t) { return new Date(ms(t)).toISOString().replace(/\.\d{3}Z$/, ".000Z"); }
+  function stixPattern(o) {
+    var q = String(o.value).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    if (o.type === "ip") return "[ipv4-addr:value = '" + q + "']";
+    if (o.type === "domain") return "[domain-name:value = '" + q + "']";
+    if (o.type === "url") return "[url:value = '" + q + "']";
+    if (o.type === "file") return "[file:name = '" + q + "']";
+    if (o.type === "hash") return "[file:hashes.'SHA-256' = '" + q + "']";
+    if (o.type === "package") return "[software:name = '" + q + "']";
+    return null;
+  }
+  function stixBundle(state, alerts, data, attackNames) {
+    var s = data.estate.shift, created = stixTime(s.date + "T" + s.endUtc + ":00Z"), org = sid("identity", data.estate.company);
+    var objs = [{ type: "identity", spec_version: "2.1", id: org, created: created, modified: created, name: data.estate.company + " SOC", identity_class: "organization" }];
+    var ap = {}, ind = {}, rel = {}, byAlert = {};
+    alerts.forEach(function (a) { byAlert[a.id] = a; });
+    Object.keys(state.incidents).forEach(function (k) {
+      var inc = state.incidents[k];
+      observables(state, inc, alerts, data).filter(function (o) { return o.ioc && stixPattern(o); }).forEach(function (o) {
+        var key = o.type + ":" + o.value;
+        if (!ind[key]) {
+          ind[key] = { type: "indicator", spec_version: "2.1", id: sid("indicator", key), created: created, modified: created, created_by_ref: org, name: o.type + " " + o.value,
+            description: "Seen during the " + s.name + " shift " + s.date + " in " + inc.id + ".", indicator_types: ["malicious-activity"],
+            pattern: stixPattern(o), pattern_type: "stix", valid_from: stixTime(o.first), labels: ["tlp:" + o.tlp.toLowerCase(), "pap:" + o.pap.toLowerCase()] };
+          objs.push(ind[key]);
+          objs.push({ type: "sighting", spec_version: "2.1", id: sid("sighting", key), created: created, modified: created, created_by_ref: org, first_seen: stixTime(o.first), last_seen: stixTime(o.last),
+            count: o.count, sighting_of_ref: ind[key].id, where_sighted_refs: [org], description: o.alerts.length ? "Alerts: " + o.alerts.join(", ") : "Added from a hunt." });
+        }
+        o.alerts.forEach(function (aid) {
+          var a = byAlert[aid]; if (!a) return;
+          a.attack.forEach(function (t) {
+            if (!ap[t]) { ap[t] = { type: "attack-pattern", spec_version: "2.1", id: sid("attack-pattern", t), created: created, modified: created, name: (attackNames && attackNames[t]) || t,
+              external_references: [{ source_name: "mitre-attack", external_id: t }] }; objs.push(ap[t]); }
+            var rid = sid("relationship", key + ">" + t);
+            if (!rel[rid]) { rel[rid] = 1; objs.push({ type: "relationship", spec_version: "2.1", id: rid, created: created, modified: created, relationship_type: "indicates", source_ref: ind[key].id, target_ref: ap[t].id }); }
+          });
+        });
+      });
+    });
+    return { type: "bundle", id: sid("bundle", data.id + "|" + s.date + "|" + objs.map(function (o) { return o.id; }).join(",")), objects: objs };
+  }
+  // ATT&CK Navigator layer (layer format 4.5) of the shift: score = alerts on the technique, colour by what the analyst concluded.
+  function navigatorLayer(state, alerts, data, attackVersion) {
+    var t = {}, s = data.estate.shift;
+    alerts.forEach(function (a) {
+      var v = state.verdicts[a.id];
+      a.attack.forEach(function (id) {
+        var x = t[id] || (t[id] = { score: 0, tp: 0, fp: 0, alerts: [] });
+        x.score++; x.alerts.push(a.id);
+        if (v && (v.verdict === "tp" || v.verdict === "escalate")) x.tp++;
+        if (v && (v.verdict === "fp" || v.verdict === "benign")) x.fp++;
+      });
+    });
+    var techniques = Object.keys(t).sort().map(function (id) {
+      var x = t[id];
+      return { techniqueID: id, score: x.score, color: x.tp ? "#c2410c" : x.fp ? "#94a3b8" : "#f59e0b", comment: x.tp + " true positive, " + x.fp + " false or benign, " + (x.score - x.tp - x.fp) + " untriaged: " + x.alerts.join(", "),
+        enabled: true, showSubtechniques: false, metadata: [{ name: "alerts", value: String(x.score) }, { name: "true positives", value: String(x.tp) }] };
+    });
+    var max = techniques.reduce(function (m, x) { return Math.max(m, x.score); }, 1);
+    return { name: s.name + " shift " + s.date, versions: { attack: String(attackVersion || "19").split(".")[0], navigator: "5.1.0", layer: "4.5" }, domain: "enterprise-attack",
+      description: "Techniques behind the alerts of one SOC Shift (" + data.id + (data.seed ? ", variant " + data.seed : "") + "). Orange: a confirmed true positive. Grey: only false or benign. Amber: not yet triaged.",
+      techniques: techniques, gradient: { colors: ["#fde68a", "#c2410c"], minValue: 0, maxValue: max },
+      legendItems: [{ label: "true positive on the shift", color: "#c2410c" }, { label: "false or benign only", color: "#94a3b8" }, { label: "untriaged", color: "#f59e0b" }],
+      hideDisabled: false, selectTechniquesAcrossTactics: true, selectSubtechniquesWithParent: false, sorting: 3, layout: { layout: "side", showID: true, showName: true } };
+  }
+
+  /* ---------- seeded variants ----------
+     variant(scenario, seed) re-draws the values the scenario's "variants" block lists: every IPv4 address inside variants.ipPools
+     moves to another address in the same range, and every id that starts with a variants.idPools prefix gets new digits.
+     Answer keys, handover text and hunts follow because the whole scenario is rewritten. Values outside the pools (real-world
+     anchors, internal ranges) stay. Seed 0, or a scenario without "variants", returns the scenario unchanged. */
+  function rng(seed) { var x = (seed >>> 0) || 1; return function () { x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0; return x / 4294967296; }; }
+  function escRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+  function intIp(n) { return [n >>> 24 & 255, n >>> 16 & 255, n >>> 8 & 255, n & 255].join("."); }
+  function variantMap(scn, seed, pools) {
+    var cfg = pools || scn.variants || {}, r = rng(seed), map = {}, used = {}, text = JSON.stringify(scn);
+    var ips = (text.match(/(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/g) || []);
+    var ids = [];
+    (cfg.idPools || []).forEach(function (p) {
+      var rx = new RegExp("\\b(?:" + p.prefixes.map(escRe).join("|") + ")\\d{" + p.digits + "}\\b", "g");
+      (text.match(rx) || []).forEach(function (v) { ids.push([v, p.digits]); });
+    });
+    ips.concat(ids.map(function (x) { return x[0]; })).forEach(function (v) { used[v] = 1; });
+    ips.forEach(function (ip) {
+      if (map[ip]) return;
+      var pool = (cfg.ipPools || []).filter(function (c) { return inCidr(ip, c); })[0]; if (!pool) return;
+      var p = pool.split("/"), size = Math.pow(2, 32 - +p[1]), base = ipInt(p[0]), n, tries = 0;
+      if (size < 8 || ipInt(ip) === base || ipInt(ip) === base + size - 1) return; // network and broadcast addresses stay
+      do { n = intIp(base + 2 + Math.floor(r() * (size - 4))); } while (used[n] && ++tries < 1000);
+      if (used[n]) return;
+      used[n] = 1; map[ip] = n;
+    });
+    ids.forEach(function (x) {
+      var v = x[0], d = x[1]; if (map[v]) return;
+      var pre = v.slice(0, v.length - d), lo = Math.pow(10, d - 1), n, tries = 0;
+      do { n = pre + String(lo + Math.floor(r() * (Math.pow(10, d) - lo))); } while (used[n] && ++tries < 1000);
+      if (used[n]) return;
+      used[n] = 1; map[v] = n;
+    });
+    return map;
+  }
+  function remapText(s, map) {
+    var keys = Object.keys(map || {}).sort(function (a, b) { return b.length - a.length; });
+    if (!keys.length) return s;
+    var rx = new RegExp("(?<![\\w.])(" + keys.map(escRe).join("|") + ")(?![\\w]|\\.\\d)", "g");
+    return String(s).replace(rx, function (m) { return map[m]; });
+  }
+  function variant(scn, seed) {
+    seed = Math.floor(+seed || 0);
+    if (!seed || !scn.variants) return scn;
+    var body = Object.assign({}, scn); delete body.variants; // the pool definitions themselves are not rewritten
+    var map = variantMap(body, seed, scn.variants), out = JSON.parse(remapText(JSON.stringify(body), map));
+    out.variants = scn.variants; out.seed = seed; out.variantMap = map;
+    return out;
+  }
+
   function newState() {
-    return { verdicts: {}, incidents: {}, actions: [], watch: [], tuning: [], huntsRun: {}, ackIn: null, enrich: {} };
+    return { verdicts: {}, incidents: {}, actions: [], watch: [], tuning: [], huntsRun: {}, ackIn: null, enrich: {}, acks: {}, obs: {}, seed: 0 };
   }
 
   var api = { load: load, entitiesOf: entitiesOf, summarize: summarize, runDetections: runDetections, correlate: correlate, CORRELATORS: CORRELATORS, indexEntities: indexEntities, byId: byId,
     alertEntities: alertEntities, relatedAlerts: relatedAlerts, timeline: timeline, actionsFor: actionsFor, applyAction: applyAction, ACTIONS: ACTIONS,
     proposeTuning: proposeTuning, acknowledge: acknowledge, buildHandover: buildHandover, lintHandover: lintHandover, grade: grade, verdictMatches: verdictMatches, answerKeyState: answerKeyState,
     newState: newState, SEVS: SEVS, VERDICTS: VERDICTS, LEVEL_RANK: LEVEL_RANK, verdictExport: verdictExport, DISPOSITION: DISPOSITION, fmtBytes: fmtBytes, decodeSafe: decodeSafe,
-    get: get, isIp: isIp, hhmmToMin: hhmmToMin, compileRules: compileRules, compileYaml: compileYaml, shiftStart: shiftStart };
+    get: get, isIp: isIp, hhmmToMin: hhmmToMin, compileRules: compileRules, compileYaml: compileYaml, shiftStart: shiftStart, normTime: normTime,
+    shiftMetrics: shiftMetrics, observables: observables, isExternal: isExternal, inCidr: inCidr, TLP: TLP, PAP: PAP, OBS_DEFAULTS: OBS_DEFAULTS,
+    theHiveAlert: theHiveAlert, theHiveCase: theHiveCase, irisAlert: irisAlert, stixBundle: stixBundle, navigatorLayer: navigatorLayer,
+    variant: variant, variantMap: variantMap, remapText: remapText };
   if (typeof module === "object" && module.exports) module.exports = api; else root.SOC = api;
 })(typeof window !== "undefined" ? window : globalThis);

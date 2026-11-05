@@ -1,5 +1,5 @@
 /* SOC Shift UI. Scenario in scenarios/<id>/scenario.js, logic in js/engine.js, rule engine vendor/sigma.js.
-   State stays in this browser's localStorage, one key per scenario. */
+   State stays in this browser's localStorage, one key per scenario. Exports are built and downloaded in the browser. */
 (function () {
   "use strict";
   var SOC = window.SOC, S = window.Sigma;
@@ -22,7 +22,18 @@
   document.head.appendChild(tag);
 
   function boot(SCN) {
-  var DATA = SOC.load(SCN), SHIFT = DATA.estate.shift;
+  var KEY = "soc-shift:" + SCN.id, state, ui = { tab: "in", sel: null, huntSel: (SCN.hunts && SCN.hunts[0] || {}).id || "H-custom", tuneOut: {}, showKey: false, raw: {} };
+  var START = SOC.hhmmToMin(SCN.estate.shift.startUtc);
+  function fresh(seed) { var s = SOC.newState(); s.sim = START + 5; s.huntYaml = {}; s.seed = seed || 0; return s; }
+  function load() { try { state = JSON.parse(localStorage.getItem(KEY)); } catch (e) { state = null; } if (!state || !state.verdicts) state = fresh(0); state.acks = state.acks || {}; state.obs = state.obs || {}; state.seed = state.seed || 0; }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  load();
+  // ?seed=N opens a seeded variant: the scenario's variant pools (attacker addresses, host numbers, customer ids) are re-drawn
+  // and the answer key follows. Seed 0 is the original. A different seed starts a fresh shift.
+  var qSeed = null; try { qSeed = new URLSearchParams(location.search).get("seed"); } catch (e) {}
+  if (qSeed !== null && /^\d{1,9}$/.test(qSeed) && +qSeed !== state.seed && (SCN.variants || +qSeed === 0)) { state = fresh(+qSeed); save(); }
+  if (!SCN.variants) state.seed = 0;
+  var DATA = SOC.load(SOC.variant(SCN, state.seed)), SHIFT = DATA.estate.shift;
   var DAY = SHIFT.date;
   var IDX = SOC.indexEntities(DATA), EVMAP = SOC.byId(DATA);
   var ALL = SOC.runDetections(DATA);
@@ -30,10 +41,6 @@
   // ATT&CK names come from the bundled snapshot. Browsers block fetch() on file://, so opened that way only the ids show.
   if (location.protocol !== "file:") fetch("vendor/attack.json").then(function (r) { return r.json(); }).then(function (d) { ATT_VER = d.version; d.techniques.forEach(function (t) { ATT[t[0]] = t[1]; }); render(); }).catch(function () {});
 
-  var KEY = "soc-shift:" + DATA.id, state, ui = { tab: "in", sel: null, huntSel: (DATA.hunts[0] || {}).id || "H-custom", tuneOut: {}, showKey: false, raw: {} };
-  function load() { try { state = JSON.parse(localStorage.getItem(KEY)); } catch (e) { state = null; } if (!state || !state.verdicts) { state = SOC.newState(); state.sim = SHIFT.startMin + 5; state.huntYaml = {}; } }
-  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
-  load();
   renderStatic();
 
   /* ---------- helpers ---------- */
@@ -86,7 +93,7 @@
   function renderStatic() {
     document.title = DATA.title + " · SOC Shift";
     $("#scnTitle").textContent = DATA.title;
-    $("#scnSub").textContent = DATA.subtitle || "";
+    $("#scnSub").textContent = (DATA.subtitle || "") + (DATA.seed ? (DATA.subtitle ? " · " : "") + "variant " + DATA.seed : "");
     $("#shiftName").textContent = SHIFT.name + " shift";
     $("#shiftHours").textContent = SHIFT.startUtc + " to " + SHIFT.endUtc + " UTC";
     $("#jumpEnd").textContent = "Jump to " + hhmm(SHIFT.endMin - 20);
@@ -103,7 +110,7 @@
   /* ---------- 1. handover in ---------- */
   function renderIn(m) {
     var H = DATA.handoverIn;
-    if (!H) { m.innerHTML = '<h2>Handover in</h2><p class="lead">This scenario starts with no handover from a previous shift.</p><div class="row"><button class="btn" data-go="queue">Go to the queue</button><button class="btn danger" id="reset">Reset the shift</button></div>'; bindCommon(); bindReset(); return; }
+    if (!H) { m.innerHTML = '<h2>Handover in</h2><p class="lead">This scenario starts with no handover from a previous shift.</p><div class="row"><button class="btn" data-go="queue">Go to the queue</button><button class="btn danger" id="reset">Reset the shift</button></div>' + variantCard(); bindCommon(); bindReset(); bindVariant(); return; }
     var items = H.items.map(function (i) {
       return '<div class="sd-card"><div class="inc-head"><div class="row">' + sev(i.severity) + " <b>" + h(i.case) + "</b> " + h(i.title) + '</div><span class="sd-tag">' + h(i.status) + "</span></div>" +
         '<dl class="kv" style="margin-top:8px"><dt>Done</dt><dd>' + h(i.done) + "</dd><dt>Next</dt><dd>" + h(i.next) + "</dd><dt>Owner</dt><dd>" + h(i.owner) + "</dd><dt>Due</dt><dd>" + h(i.due) + "</dd>" + (i.pending ? "<dt>Waiting on</dt><dd>" + h(i.pending) + "</dd>" : "") + "</dl></div>";
@@ -112,7 +119,7 @@
       '<p class="lead">Start of the ' + h(SHIFT.name) + " shift (" + h(SHIFT.startUtc) + " UTC). Read what " + h(H.from) + ' left open and acknowledge it: the cases and watch list become yours. Then move the shift clock and work the queue.</p>' +
       '<div class="sd-card"><dl class="kv"><dt>From</dt><dd>' + h(H.analyst) + ", sent " + h(t5(H.at)) + " UTC</dd><dt>Summary</dt><dd>" + h(H.summary) + "</dd><dt>" + h(H.from) + " metrics</dt><dd>" + H.metrics.alerts + " alerts, " + H.metrics.tp + " TP, " + H.metrics.fp + " FP, " + H.metrics.benign + " benign</dd></dl>" +
       '<div class="row" style="margin-top:10px">' + (state.ackIn ? '<span class="sd-tag v-benign">Acknowledged at ' + h(state.ackIn.slice(11, 16)) + " UTC</span>" : '<button class="btn pri" id="ack">Acknowledge and take ownership</button>') +
-      '<button class="btn" data-go="queue">Go to the queue</button><button class="btn danger" id="reset">Reset the shift</button></div></div>' + items +
+      '<button class="btn" data-go="queue">Go to the queue</button><button class="btn danger" id="reset">Reset the shift</button></div></div>' + items + variantCard() +
       '<div class="sd-card"><h3 style="margin-top:0">How this desk works</h3><ol class="facts"><li>Advance the shift clock. Alerts arrive at the time their condition was met.</li><li>Open an alert: read the evidence, click any entity to pivot across EDR, SSE, WAF and SIEM, run live lookups.</li><li>Record a verdict with a reason the next shift can check, and link true positives to an incident.</li><li>Take response actions from the entity panel. Actions owned by other teams stay pending and carry into the handover.</li><li>Hunt for what no alert caught, propose tuning for noisy rules (each proposal is re-run against confirmed true positives), then hand over to ' + h(SHIFT.to) + '.</li><li>Check your shift against the answer key.</li></ol></div>';
     var ack = $("#ack");
     if (ack) ack.onclick = function () {
@@ -120,15 +127,23 @@
       var cases = H.items.filter(function (i) { return i.kind === "case"; }).map(function (i) { return i.case; });
       save(); toast("Handover acknowledged." + (cases.length ? " " + cases.join(", ") + (cases.length > 1 ? " are" : " is") + " now yours." : "")); render();
     };
-    bindReset(); bindCommon();
+    bindReset(); bindVariant(); bindCommon();
   }
-  function bindReset() { $("#reset").onclick = function () { if (confirm("Clear every verdict, incident and action and start the shift again?")) { try { localStorage.removeItem(KEY); } catch (e) {} state = null; load(); ui.sel = null; ui.tuneOut = {}; render(); } }; }
+  function variantCard() {
+    if (!DATA.variants) return "";
+    return '<div class="sd-card"><h3 style="margin-top:0">Shift variant</h3><p class="dim">' + (DATA.seed ? "Variant " + DATA.seed + ": attacker addresses, host numbers and customer ids differ from the original shift, so the answer key does too. The attack chains are the same." : "The original shift. A variant re-draws attacker addresses, host numbers and customer ids, so the answer key changes and has to be worked out again.") +
+      '</p><div class="row" style="margin-top:8px"><button class="btn" id="variant">Start a new variant</button>' + (DATA.seed ? '<a class="btn" href="' + h(seedHref(0)) + '">Back to the original</a>' : "") + "</div></div>";
+  }
+  function seedHref(n) { var q; try { q = new URLSearchParams(location.search); } catch (e) { return "?seed=" + n; } q.set("seed", String(n)); return "?" + q.toString(); }
+  function bindVariant() { var b = $("#variant"); if (b) b.onclick = function () { if (confirm("Start a new variant? This clears the current shift.")) location.search = seedHref(1 + Math.floor(Math.random() * 999999)); }; }
+  function bindReset() { $("#reset").onclick = function () { if (confirm("Clear every verdict, incident and action and start the shift again?")) { var keep = state.seed; try { localStorage.removeItem(KEY); } catch (e) {} state = fresh(keep); save(); ui.sel = null; ui.tuneOut = {}; render(); } }; }
 
   /* ---------- 2. queue ---------- */
   function renderQueue(m) {
     var vis = visible();
     if (!vis.length) { m.innerHTML = '<div class="empty">No alerts yet at ' + hhmm(state.sim) + " UTC. Advance the shift clock.</div>"; return; }
     if (!ui.sel || !vis.some(function (a) { return a.id === ui.sel; })) ui.sel = (vis.filter(function (a) { return !state.verdicts[a.id]; })[0] || vis[0]).id;
+    if (!state.acks[ui.sel]) { state.acks[ui.sel] = simIso(); save(); } // first open on the shift clock acknowledges the alert (MTTA)
     var list = vis.slice().reverse().map(function (a) {
       var v = state.verdicts[a.id];
       return '<button class="qitem' + (a.id === ui.sel ? " on" : "") + (v ? "" : " new") + '" data-sel="' + h(a.id) + '"><span class="t">' + h(a.title) + '</span><span class="m">' + sev(v && v.sev ? v.sev : a.level) + '<span class="sd-tag">' + h(a.platform) + "</span><span class=mono>" + h(a.at.slice(11, 16)) + "</span>" + h(a.key) + " " + vtag(v) + "</span></button>";
@@ -305,15 +320,39 @@
         '<div class=two><div><label class=f>Owner</label><select data-inc="' + h(i.id) + '" data-k="owner"><option value="">Unassigned</option>' + OWNERS.map(function (o) { return "<option" + (i.owner === o ? " selected" : "") + ">" + o + "</option>"; }).join("") + "</select></div><div>" + f("due", "Due (UTC)", "e.g. 10:00 UTC") + "</div></div>" +
         '<label class=f style="display:flex;gap:6px;align-items:center"><input type=checkbox data-inc="' + h(i.id) + '" data-k="irNotified"' + (i.irNotified ? " checked" : "") + "> IR lead notified</label>" +
         "<h3>Alerts</h3><div class=row>" + (i.alerts.length ? i.alerts.map(function (aid) { return '<button class="sd-tag" data-sel="' + h(aid) + '">' + h(aid) + "</button>"; }).join("") : "<span class=dim>none linked</span>") + "</div>" +
-        "<h3>Entities</h3><div class=row>" + ents.map(entChip).join("") + "</div>" +
+        "<h3>Entities</h3><div class=row>" + ents.map(entChip).join("") + "</div>" + obsTable(i) +
         "<h3>Response log</h3>" + (acts.length ? '<div class=tablewrap><table class=ev><colgroup><col style=width:70px><col><col style=width:120px><col style=width:170px></colgroup><thead><tr><th>UTC</th><th>Action</th><th>Status</th><th>Owner</th></tr></thead><tbody>' + acts.map(function (a, ix) { return "<tr><td class=mono>" + h(a.at.slice(11, 16)) + "</td><td>" + h(a.label) + " · <span class=mono>" + h(a.entity) + "</span></td><td>" + (a.status === "pending" ? '<button class="btn sm" data-done="' + state.actions.indexOf(a) + '">pending: mark done</button>' : '<span class=ok>done</span>') + "</td><td>" + h(a.owner) + "</td></tr>"; }).join("") + "</tbody></table></div>" : "<p class=dim>No actions yet. Open an entity to act.</p>") +
         "<h3>Timeline (" + plural(evs.length, "event") + ")</h3><div class=tablewrap><table class=ev><colgroup><col style=width:92px><col style=width:84px><col></colgroup><tbody>" + evs.map(function (e) { return "<tr><td class=mono>" + h(t5(e._t)) + "</td><td>" + srcb(e._src) + "</td><td class=mono>" + h(SOC.summarize(e)) + "</td></tr>"; }).join("") + "</tbody></table></div></div>";
     }).join("");
     $$("[data-inc]").forEach(function (el) {
       el.onchange = function () { var i = state.incidents[el.dataset.inc]; i[el.dataset.k] = el.type === "checkbox" ? el.checked : el.value; save(); renderChrome(); if (el.tagName === "SELECT") render(); };
     });
+    $$("[data-obs]").forEach(function (el) { el.onchange = function () { var k = el.dataset.obs, o = state.obs[k] || (state.obs[k] = {}); o[el.dataset.f] = el.type === "checkbox" ? el.checked : el.value; save(); }; });
+    $$("[data-xp]").forEach(function (b) { b.onclick = function () { exportCase(b.dataset.xp, b.dataset.inc); }; });
     $$("[data-done]").forEach(function (b) { b.onclick = function () { var a = state.actions[+b.dataset.done]; a.status = "done"; a.doneAt = simIso(); save(); toast(a.label + " confirmed by " + a.owner + "."); render(); }; });
     bindCommon();
+  }
+
+  /* ---------- observables and case exports ---------- */
+  var TLPS = ["CLEAR", "GREEN", "AMBER", "AMBER+STRICT", "RED"], PAPS = ["CLEAR", "GREEN", "AMBER", "RED"];
+  function arrived() { return visible(); }
+  function obsTable(i) {
+    var obs = SOC.observables(state, i, arrived(), DATA), cfg = DATA.observables || {}, ex = cfg.external || SOC.OBS_DEFAULTS.external, inn = cfg.internal || SOC.OBS_DEFAULTS.internal;
+    var buttons = '<div class="row" style="margin-top:8px"><button class="btn sm" data-xp="hive" data-inc="' + h(i.id) + '">TheHive case JSON</button><button class="btn sm" data-xp="iris" data-inc="' + h(i.id) + '">DFIR-IRIS alerts JSON</button><button class="btn sm" data-xp="stix" data-inc="' + h(i.id) + '">STIX 2.1 bundle</button></div>';
+    if (!obs.length) return "<h3>Observables</h3><p class=dim>None yet. Link an alert or add hunt hits to this incident.</p>" + buttons;
+    var sel = function (k, f, list, v) { return '<select data-obs="' + h(k) + '" data-f="' + f + '" aria-label="' + f.toUpperCase() + " for " + h(k) + '">' + list.map(function (x) { return "<option" + (x === v ? " selected" : "") + ">" + x + "</option>"; }).join("") + "</select>"; };
+    return "<h3>Observables (" + obs.length + ")</h3><p class=dim>The IOC flag, TLP and PAP go out with every export. Defaults: attacker infrastructure is an IOC at TLP:" + h(ex.tlp) + ", PAP:" + h(ex.pap) + "; internal people, hosts, sessions and keys stay TLP:" + h(inn.tlp) + ", PAP:" + h(inn.pap) + ".</p>" +
+      '<div class=tablewrap><table class="ev obs"><colgroup><col style="width:34%"><col style="width:10%"><col style="width:21%"><col style="width:16%"><col style="width:19%"></colgroup><thead><tr><th>Observable</th><th>IOC</th><th>TLP</th><th>PAP</th><th>Seen</th></tr></thead><tbody>' +
+      obs.map(function (o) { var k = o.type + ":" + o.value; return '<tr><td><span class="sd-tag">' + h(ENT_LABEL[o.type] || o.type) + '</span> <span class="mono">' + h(o.value) + '</span></td><td><input type=checkbox data-obs="' + h(k) + '" data-f="ioc"' + (o.ioc ? " checked" : "") + ' aria-label="IOC: ' + h(k) + '"></td><td>' + sel(k, "tlp", TLPS, o.tlp) + "</td><td>" + sel(k, "pap", PAPS, o.pap) + "</td><td>" + plural(o.count, "event") + ", first <span class=mono>" + h(t5(o.first)) + "</span></td></tr>"; }).join("") + "</tbody></table></div>" + buttons;
+  }
+  function json(obj, name) { download(JSON.stringify(obj, null, 2) + "\n", name, "application/json"); }
+  function tag() { return DATA.id + (DATA.seed ? "-v" + DATA.seed : ""); }
+  function exportCase(kind, id) {
+    var al = arrived(), inc = state.incidents[id];
+    if (kind === "hive") json(SOC.theHiveCase(state, inc, al, DATA), "thehive-" + tag() + "-" + id + ".json");
+    if (kind === "iris") { var obs = SOC.observables(state, inc, al, DATA); json(al.filter(function (a) { return inc.alerts.indexOf(a.id) >= 0; }).map(function (a) { return SOC.irisAlert(state, a, DATA, obs, 1); }), "dfir-iris-" + tag() + "-" + id + ".json"); }
+    if (kind === "stix") { var one = JSON.parse(JSON.stringify(state)); Object.keys(one.incidents).forEach(function (k) { if (k !== id) delete one.incidents[k]; }); json(SOC.stixBundle(one, al, DATA, ATT), "stix-" + tag() + "-" + id + ".json"); }
+    toast("Downloaded.");
   }
 
   /* ---------- 4. hunt ---------- */
@@ -387,10 +426,20 @@
     var vis = visible(), md = SOC.buildHandover(state, vis, DATA), lint = SOC.lintHandover(state, vis, hhmm(state.sim), DATA);
     m.innerHTML = "<h2>Handover to " + h(SHIFT.to) + "</h2><p class=lead>Built from your verdicts, incidents, actions, watch list and tuning requests. The check below lists what would make the next shift lose time or lose an item.</p>" +
       '<div class=sd-card><h3 style="margin-top:0">Handover check: ' + (lint.length ? lint.length + " issues" : '<span class=ok>clean</span>') + "</h3>" + (lint.length ? '<ul class=lint>' + lint.map(function (i) { return '<li class="' + i.sev + '">' + h(i.sev) + ": " + h(i.msg) + "</li>"; }).join("") + "</ul>" : "<p class=ok>Every open item has an owner, a next action and a due time.</p>") + "</div>" +
-      '<div class=sd-card><div class=inc-head><h3 style="margin-top:0">Handover note</h3><div class=row><button class=btn id=ocopy>Copy</button><button class=btn id=odl>Download .md</button><button class="btn" id=onds>Download verdicts (.ndjson)</button></div></div><pre class=md>' + h(md) + "</pre></div>";
+      metricsCard(vis) +
+      '<div class=sd-card><div class=inc-head><h3 style="margin-top:0">Handover note</h3><div class=row><button class=btn id=ocopy>Copy</button><button class=btn id=odl>Download .md</button><button class="btn" id=onds>Download verdicts (.ndjson)</button><button class=btn id=onav>ATT&amp;CK Navigator layer</button><button class=btn id=ostix>STIX 2.1 bundle</button></div></div><pre class=md>' + h(md) + "</pre></div>";
     $("#ocopy").onclick = function () { if (!navigator.clipboard) { toast("Copy is not available in this browser."); return; } navigator.clipboard.writeText(md).then(function () { toast("Copied."); }, function () { toast("Copy was blocked."); }); };
     $("#onds").onclick = function () { var nd = SOC.verdictExport(state, ALL); if (!nd.trim()) { toast("Record a verdict on at least one alert first."); return; } download(nd, "verdicts-" + DATA.id + "-" + DAY + ".ndjson", "application/x-ndjson"); };
     $("#odl").onclick = function () { download(md, "handover-" + SHIFT.name + "-" + DAY + ".md", "text/markdown"); };
+    $("#onav").onclick = function () { json(SOC.navigatorLayer(state, visible(), DATA, ATT_VER || "19"), "attack-layer-" + tag() + "-" + DAY + ".json"); toast("Downloaded. Open it in ATT&CK Navigator."); };
+    $("#ostix").onclick = function () { json(SOC.stixBundle(state, visible(), DATA, ATT), "stix-shift-" + tag() + "-" + DAY + ".json"); toast("Downloaded."); };
+  }
+  function fm(x) { return x === null ? "n/a" : x < 60 ? (Math.round(x * 10) / 10) + " min" : (Math.round(x / 6) / 10) + " h"; }
+  function metricsCard(vis) {
+    var mt = SOC.shiftMetrics(state, vis);
+    var cell = function (label, s, how) { return '<div class=counter><b>' + fm(s.mean) + "</b><span>" + label + " (median " + fm(s.median) + ", n " + s.n + ")</span><span class=dim>" + how + "</span></div>"; };
+    return '<div class=sd-card><h3 style="margin-top:0">Shift timing</h3><div class="counters mt">' + cell("MTTD", mt.mttd, "alert time minus first event") + cell("MTTA", mt.mtta, "first opened minus alert time") + cell("MTTR", mt.mttr, "verdict time minus alert time") + cell("Time to first response", mt.mttrespond, "first completed action minus first alert, per incident") +
+      "</div><p class=dim style=\"margin-top:8px\">On the shift clock. Means and nearest-rank medians over alerts that have both times.</p></div>";
   }
   function download(text, name, type) { var a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], { type: type })); a.download = name; document.body.appendChild(a); a.click(); a.remove(); }
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Validate a SOC Shift scenario folder. No dependencies.
 //   node tools/validate-scenario.mjs app/scenarios/kestrel-ledger
+//   node tools/validate-scenario.mjs app/scenarios/kestrel-ledger --seed 7 --seed 12345   # also check seeded variants
 // Exit code 0 when every check passes, 1 otherwise. The format is documented in docs/SCENARIOS.md.
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -24,7 +25,8 @@ function ipToInt(ip) { return ip.split(".").reduce((a, o) => a * 256 + +o, 0); }
 function inCidr(ip, cidr) { const [base, bits] = cidr.split("/"); const size = 2 ** (32 - +bits); const b = ipToInt(base); const v = ipToInt(ip); return v >= b && v < b + size; }
 function luhn(d) { let s = 0, alt = false; for (let i = d.length - 1; i >= 0; i--) { let n = +d[i]; if (alt) { n *= 2; if (n > 9) n -= 9; } s += n; alt = !alt; } return s % 10 === 0; }
 
-export function validate(dir) {
+export function validate(dir, opts = {}) {
+  const seed = Math.floor(+opts.seed || 0);
   const results = [];
   const ok = (cond, msg) => { results.push({ ok: !!cond, msg }); return !!cond; };
   const abs = path.resolve(dir);
@@ -36,6 +38,7 @@ export function validate(dir) {
   try { scn = require(file); } catch (e) { ok(false, "scenario.js loads: " + e.message); return results; }
   ok(scn && typeof scn === "object", "scenario.js exports an object (module.exports in node)");
   const src = fs.readFileSync(file, "utf8");
+  const src0 = JSON.stringify(scn);
 
   // ---- shape
   ok(scn.schema === 1, "schema is 1");
@@ -47,6 +50,29 @@ export function validate(dir) {
   ok(sh && sh.startUtc < sh.endUtc, "shift ends after it starts on the same UTC date");
   ok(Array.isArray(scn.events) && scn.events.length > 0, "events is a non-empty list (" + (scn.events || []).length + ")");
   ok(Array.isArray(scn.rules), "rules is a list");
+
+  // ---- optional blocks: alert delays, observable defaults, seeded variants
+  const PLATFORMS = new Set([...(scn.rules || []), ...(scn.correlations || [])].map((r) => r.platform));
+  if (scn.alertDelayMinutes !== undefined) {
+    const d = scn.alertDelayMinutes;
+    ok(d && typeof d === "object" && Object.entries(d).every(([k, v]) => Number.isFinite(v) && v >= 0 && v <= 120), "alertDelayMinutes maps platforms to 0 to 120 minutes");
+    ok(Object.keys(d || {}).every((k) => PLATFORMS.has(k)), "alertDelayMinutes names only platforms the rules use (" + [...PLATFORMS].join(", ") + ")");
+  }
+  for (const r of scn.rules || []) if (r.delayMinutes !== undefined) ok(Number.isFinite(r.delayMinutes) && r.delayMinutes >= 0 && r.delayMinutes <= 120, r.id + " delayMinutes is 0 to 120");
+  if (scn.observables !== undefined) {
+    const o = scn.observables || {};
+    ok(!o.notIoc || (Array.isArray(o.notIoc) && o.notIoc.every((x) => typeof x === "string" && x)), "observables.notIoc is a list of values");
+    for (const side of ["external", "internal"]) if (o[side]) ok(SOC.TLP[o[side].tlp] !== undefined && SOC.PAP[o[side].pap] !== undefined, "observables." + side + " has a TLP 2.0 level (" + Object.keys(SOC.TLP).join(", ") + ") and a PAP level (" + Object.keys(SOC.PAP).join(", ") + ")");
+  }
+  if (scn.variants !== undefined) {
+    const v = scn.variants || {};
+    const cidrOk = (c) => /^\d{1,3}(\.\d{1,3}){3}\/(\d|[12]\d|2[0-9])$/.test(c) && SOC.inCidr(c.split("/")[0], c) && +c.split("/")[1] <= 29;
+    ok(Array.isArray(v.ipPools || []) && (v.ipPools || []).every(cidrOk), "variants.ipPools are IPv4 CIDR ranges of /29 or wider");
+    ok((v.ipPools || []).every((c) => SYNTHETIC_V4.some((s) => SOC.inCidr(c.split("/")[0], s))), "variants.ipPools sit inside private or documentation ranges");
+    ok(Array.isArray(v.idPools || []) && (v.idPools || []).every((p) => Array.isArray(p.prefixes) && p.prefixes.length && p.prefixes.every((x) => typeof x === "string" && x) && Number.isInteger(p.digits) && p.digits >= 2 && p.digits <= 9), "variants.idPools have prefixes and 2 to 9 digits");
+    const anchorIps = ((scn.anchors || {}).ips) || [];
+    ok(!anchorIps.some((ip) => (v.ipPools || []).some((c) => SOC.inCidr(ip, c))), "no real-world anchor sits inside a variant pool");
+  }
 
   // ---- events: timestamps and order as authored
   const tsRe = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
@@ -89,10 +115,25 @@ export function validate(dir) {
   (scn.rules || []).forEach((r) => ok(tagIds(r.yaml).length > 0, r.id + " maps to at least one ATT&CK technique"));
 
   // ---- detections against the answer key
-  let data, alerts = [];
-  try { data = SOC.load(scn); SOC.indexEntities(data); alerts = SOC.runDetections(data); ok(true, "detections run (" + alerts.length + " alerts)"); }
+  let data, alerts = [], authored = scn;
+  if (seed) {
+    if (!ok(scn.variants, "seed " + seed + ": the scenario has a variants block")) return results;
+    const v = SOC.variant(scn, seed), map = v.variantMap || {};
+    const vals = Object.values(map), origText = JSON.stringify(Object.assign({}, scn, { variants: null }));
+    ok(vals.length > 0, "seed " + seed + ": re-draws " + vals.length + " values");
+    ok(new Set(vals).size === vals.length && vals.every((x) => !Object.prototype.hasOwnProperty.call(map, x)), "seed " + seed + ": the re-draw is one to one and lands on new values");
+    ok(Object.entries(map).every(([a, b]) => SOC.isIp(a) ? (scn.variants.ipPools || []).some((c) => SOC.inCidr(a, c) && SOC.inCidr(b, c)) : a.slice(0, a.search(/\d+$/)) === b.slice(0, b.search(/\d+$/))), "seed " + seed + ": addresses stay in their range and ids keep their prefix");
+    const vText = JSON.stringify(Object.assign({}, v, { variants: null, variantMap: null }));
+    const left = Object.keys(map).filter((k) => SOC.remapText(vText, { [k]: "\u0000" }) !== vText);
+    ok(!left.length, "seed " + seed + ": no original value is left in the variant" + (left.length ? ": " + left.join(", ") : ""));
+    ok(((scn.anchors || {}).ips || []).every((ip) => origText.includes(ip) === vText.includes(ip)), "seed " + seed + ": real-world anchors stay");
+    ok(JSON.stringify(scn) === src0, "seed " + seed + ": the authored scenario is not changed");
+    authored = v;
+  }
+  try { data = SOC.load(authored); SOC.indexEntities(data); alerts = SOC.runDetections(data); ok(true, "detections run (" + alerts.length + " alerts" + (seed ? ", seed " + seed : "") + ")"); }
   catch (e) { ok(false, "detections run: " + e.message); return results; }
-  const answers = scn.answers || {};
+  const answers = authored.answers || {};
+  scn = authored;
   for (const k of Object.keys(answers)) ok(alerts.some((a) => a.id === k), "answer key alert is raised: " + k);
   for (const a of alerts) ok(answers[a.id], "raised alert has an answer key entry: " + a.id);
   for (const [k, v] of Object.entries(answers)) {
@@ -102,6 +143,8 @@ export function validate(dir) {
     if (v.verdict === "tp" || v.verdict === "escalate") ok(v.incident || SOC.LEVEL_RANK[v.sev] < 2, k + " is " + v.verdict + " at " + v.sev + " and names an incident");
   }
   for (const a of alerts) ok(a.attack.length > 0 && a.at >= a.first, "alert " + a.id + " has ATT&CK ids and arrives after its first event");
+  const shiftEnd = sh.date + "T" + sh.endUtc + ":00Z";
+  for (const a of alerts) ok(SOC.normTime(a.at) <= shiftEnd, "alert " + a.id + " arrives before the shift ends (" + a.at + ")");
 
   // ---- hunts find what the key says
   const alerted = new Set(alerts.flatMap((a) => a.events));
@@ -166,15 +209,19 @@ export function validate(dir) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
-  const dirs = process.argv.slice(2);
-  if (!dirs.length) { console.error("usage: node tools/validate-scenario.mjs <scenario dir> [more dirs]"); process.exit(2); }
+  const args = process.argv.slice(2), dirs = [], seeds = [0];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--seed") { const n = +args[++i]; if (!Number.isInteger(n) || n < 0) { console.error("--seed takes a whole number"); process.exit(2); } if (n) seeds.push(n); }
+    else dirs.push(args[i]);
+  }
+  if (!dirs.length) { console.error("usage: node tools/validate-scenario.mjs <scenario dir> [more dirs] [--seed N ...]"); process.exit(2); }
   let bad = 0;
-  for (const d of dirs) {
-    const r = validate(d);
+  for (const d of dirs) for (const seed of seeds) {
+    const r = validate(d, { seed });
     const fails = r.filter((x) => !x.ok);
     fails.forEach((x) => console.log("FAIL " + x.msg));
     if (process.env.VERBOSE) r.filter((x) => x.ok).forEach((x) => console.log("ok   " + x.msg));
-    console.log(d + ": " + (r.length - fails.length) + "/" + r.length + " checks passed");
+    console.log(d + (seed ? " (seed " + seed + ")" : "") + ": " + (r.length - fails.length) + "/" + r.length + " checks passed");
     bad += fails.length;
   }
   process.exit(bad ? 1 : 0);

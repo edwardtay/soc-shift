@@ -1,6 +1,6 @@
 {
   "name": "soc-shift",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Work a fictional SOC shift in your browser: take the handover, triage Sigma and correlation alerts, pivot, respond, hunt, tune with a regression check, and hand over.",
   "private": true,
   "license": "MIT",
@@ -10,7 +10,7 @@
   "engines": { "node": ">=18" },
   "scripts": {
     "test": "node test/run.mjs",
-    "validate": "node tools/validate-scenario.mjs app/scenarios/kestrel-ledger",
+    "validate": "node tools/validate-scenario.mjs app/scenarios/kestrel-ledger --seed 7 --seed 12345 --seed 31337",
     "serve": "python3 -m http.server 8080 --directory app"
   }
 }

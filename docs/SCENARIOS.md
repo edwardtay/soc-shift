@@ -46,6 +46,9 @@ Copy `app/scenarios/kestrel-ledger/scenario.js` as a starting point.
 | `actions` | no | Replaces the built-in response actions for an entity type. Shape below. |
 | `anchors` | no | `{ ips: [], packages: [], notes: "" }`. Real public addresses the scenario uses on purpose (the validator allows these), and a sentence shown in the page footer. |
 | `enrichExamples` | no | Indicators offered as one-click examples on the Enrich tab. |
+| `alertDelayMinutes` | no | `{ "<platform>": minutes }`: how long after its first event a Sigma alert reaches the queue. Shape below. |
+| `observables` | no | `{ notIoc, external, internal }`: which values never become IOCs, and the default TLP and PAP for the case exports. Shape below. |
+| `variants` | no | `{ ipPools, idPools }`: the values `?seed=N` re-draws. Shape below. Without it the scenario has no variants. |
 | `handoverIn` | no | The incoming handover. Shape below. Omit it for a shift that starts clean. |
 | `events` | yes | The event lake. Shape below. |
 | `rules` | yes | Single-event detections in Sigma YAML. |
@@ -195,6 +198,50 @@ actions: {
 
 `self: true` means the SOC does it now and it is logged as done. Without it, the action goes to `owner` and stays pending until someone marks it done; pending actions carry into the handover.
 
+### Alert delays
+
+```js
+alertDelayMinutes: { EDR: 1, WAF: 1, SSE: 2, SIEM: 5 }
+```
+
+A Sigma alert arrives `alertDelayMinutes[platform]` minutes after its first matching event, the way a streaming EDR or WAF feed lands in a minute and a scheduled SIEM search runs every few minutes. A rule can set its own `delayMinutes`, which wins over the platform value. Correlations arrive at the event that completes them, with no extra delay. Without `alertDelayMinutes`, alerts arrive at their first event. The delay is what the shift's MTTD measures, so pick values close to the pipeline the scenario imitates. Keep every alert inside the shift: the validator fails an alert that arrives after `estate.shift.endUtc`.
+
+### Observables
+
+```js
+observables: {
+  notIoc: ["kestrel.example", "github.com", "140.82.112.4", "Q3_reserve_attestation_draft.xlsx"],
+  external: { tlp: "GREEN", pap: "AMBER" },
+  internal: { tlp: "AMBER+STRICT", pap: "RED" }
+}
+```
+
+Each incident lists the observables from its linked alerts and from hunt hits added to it, with an IOC flag, a TLP and a PAP the learner can change. These go out with the TheHive, DFIR-IRIS and STIX exports.
+
+- An observable is attacker-side by default when it is an IP outside private, CGNAT and `estate.corpEgress` ranges, a domain outside `estate.apps`, or an npm package, file name, URL or hash. Attacker-side values start as IOCs with the `external` levels. Users, hosts, sessions, cloud keys and customers start with the `internal` levels and are never IOCs by default.
+- `notIoc` lists values that are never IOCs: well-known services the staff use, the company's own domains (a domain also matches its subdomains) and the company's own documents.
+- `external` and `internal` default to TLP:GREEN, PAP:AMBER and TLP:AMBER+STRICT, PAP:RED. TLP levels are the TLP 2.0 set (`CLEAR`, `GREEN`, `AMBER`, `AMBER+STRICT`, `RED`), PAP levels are `CLEAR`, `GREEN`, `AMBER`, `RED`.
+- `noisyEntities` are left out of observables.
+- The DFIR-IRIS export sets a host's asset type from `estate.hosts[host].os`: macOS is a Mac computer, Linux a Linux computer, anything else a Windows computer.
+
+### Seeded variants
+
+```js
+variants: {
+  ipPools: ["192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"],
+  idPools: [{ prefixes: ["KL-MBP-", "SG-WIN-"], digits: 4 }, { prefixes: ["cust-"], digits: 5 }]
+}
+```
+
+`index.html?seed=N` (or **Start a new variant** on the Handover in tab) opens the scenario with these values re-drawn from seed `N`:
+
+- every IPv4 address inside an `ipPools` range moves to another address in the same range (network and broadcast addresses stay)
+- every id made of an `idPools` prefix and exactly `digits` digits gets new digits with the same prefix
+
+The whole scenario is rewritten, so events, rules, hunts, the answer key, the incoming handover, `goodShift` and `enrichExamples` all follow. The re-draw is one to one and never lands on a value the scenario already uses. Values outside the pools, such as `anchors.ips` and internal addresses, stay. Seed 0 is the original. A different seed starts a fresh shift in the same storage key.
+
+Put only invented values in the pools: the validator requires `ipPools` to sit inside private or documentation ranges and fails a pool that holds an `anchors.ips` address. Check a few seeds with `--seed` (below).
+
 ## Answer keys and grading
 
 Every alert the detections raise needs an answer, and every answer must match an alert that is raised. Alert ids are `<rule or correlation id>|<group key>`:
@@ -226,6 +273,7 @@ huntAnswers: {
 
 ```sh
 node tools/validate-scenario.mjs app/scenarios/<id>
+node tools/validate-scenario.mjs app/scenarios/<id> --seed 7 --seed 12345   # also check seeded variants
 VERBOSE=1 node tools/validate-scenario.mjs app/scenarios/<id>   # print every passing check too
 ```
 
@@ -236,12 +284,15 @@ The validator checks:
 - every rule, correlation `select` and hunt compiles with sigma.js; ids are unique; correlation types exist
 - every ATT&CK technique id in rule tags, hunt tags and correlation `attack` exists in the bundled ATT&CK snapshot (`app/vendor/attack.json`, v19.2)
 - detections run, every answer-key alert is raised and every raised alert has an answer, with a valid verdict, severity and reason
+- every alert arrives before the shift ends
+- `alertDelayMinutes` names platforms the rules use with 0 to 120 minutes, `observables` uses known TLP and PAP levels, `variants` pools are valid ranges inside private or documentation space with no anchor in them
+- with `--seed N`: the re-draw is one to one, stays in its pools, leaves no original pooled value behind, keeps the anchors, and the variant passes every detection, answer-key, hunt, tuning, grading and handover check above
 - hunt `expectHits` and `unalerted`, and every `tuningChecks` rule
 - a shift that follows the answer key scores full marks and passes the handover check
 - no real-looking personal data: email addresses must use reserved example domains (`.example`, `example.com`), IPv4 addresses must be private, CGNAT, documentation ranges or listed in `anchors.ips`, AWS key ids must contain `EXAMPLE`, and there are no Luhn-valid card-like numbers or phone numbers
 - no em or en dashes
 
-`npm test` runs the validator on every folder under `app/scenarios/`.
+`npm test` runs the validator on every folder under `app/scenarios/`, and on Kestrel Ledger with seeds 7, 12345 and 31337.
 
 ## Writing tips
 

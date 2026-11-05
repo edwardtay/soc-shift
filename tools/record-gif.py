@@ -79,8 +79,13 @@ with sync_playwright() as p:
     pg.click("#tabs [data-tab=tune]"); snap(1200)
     pg.click("[data-tune='R-WAF-001']")
     pg.locator(".diff").scroll_into_view_if_needed(); snap(3200)
-    # 7. handover lint
-    pg.click("#tabs [data-tab=out]"); snap(3300)
+    # 7. incident observables with IOC, TLP and PAP, ready to export
+    pg.wait_for_timeout(2700)  # let the last toast clear
+    pg.click("#tabs [data-tab=inc]")
+    pg.locator("table.obs").first.evaluate("e => e.scrollIntoView({block: 'center'})"); snap(2600)
+    # 8. handover check, then shift timing
+    pg.click("#tabs [data-tab=out]"); snap(3000)
+    pg.locator(".counters.mt").evaluate("e => e.scrollIntoView({block: 'center'})"); snap(3000)
     ctx.close(); b.close()
 
 lst = os.path.join(tmp, "frames.txt")

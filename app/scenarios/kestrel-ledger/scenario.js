@@ -52,6 +52,23 @@
       notes: "The npm package ethersscan-api (OSV MAL-2024-8847) and the owners of the two VPS addresses 149.28.17.9 and 45.32.101.18 are real, so those lookups return true answers. The GitHub, LinkedIn and Bitbucket addresses are the services' public addresses. The MetaMask extension id is the real Chrome Web Store id. Every other person, host, customer and event is invented."
     },
 
+    /* minutes from an alert's first event to its arrival in the queue, per platform: streaming EDR and WAF in about a minute,
+       SSE log upload in two, scheduled SIEM searches on a five-minute cadence. Correlations arrive at the event that completes them. */
+    alertDelayMinutes: { EDR: 1, WAF: 1, SSE: 2, SIEM: 5 },
+
+    /* observable defaults for the case exports: values that are never IOCs (well-known services, the company's own domains and documents) */
+    observables: {
+      notIoc: ["kestrel.example", "zendesk.example", "github.com", "bitbucket.org", "linkedin.com", "google.com", "azure.com", "140.82.112.4", "13.107.42.14", "104.192.141.1", "Q3_reserve_attestation_draft.xlsx"],
+      external: { tlp: "GREEN", pap: "AMBER" },
+      internal: { tlp: "AMBER+STRICT", pap: "RED" }
+    },
+
+    /* ?seed=N re-draws these: attacker addresses inside the documentation ranges, workstation numbers and the customer id */
+    variants: {
+      ipPools: ["192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"],
+      idPools: [{ prefixes: ["KL-MBP-", "SG-WIN-", "LIS-WIN-", "HCM-WIN-"], digits: 4 }, { prefixes: ["cust-"], digits: 5 }]
+    },
+
     enrichExamples: ["ethersscan-api", "149.28.17.9", "45.32.101.18", "203.0.113.47", "CVE-2024-3400", "dl-mirror.example"],
 
     /* the carried-in handover from the previous shift */
