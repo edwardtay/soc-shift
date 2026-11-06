@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/edwardtay/soc-shift/test/schemas/thehive5/case-export.schema.json",
+  "title": "SOC Shift TheHive 5 case export",
+  "$comment": "TheHive publishes no JSON Schema. The object shapes in $defs transcribe the TypedDicts InputCase, InputAlert, InputObservable, InputTask and InputProcedure from thehive4py 2.1.0 (commit 6a4765c39a65c328032343923de866ab4ad10127, thehive4py/types/*.py, MIT). Required keys are the ones without NotRequired; other keys are rejected. Severity 1 to 4, TLP 0 to 4 (4 is AMBER+STRICT) and PAP 0 to 3 are the integer codes from TheHive 5's API documentation. The wrapper (case, observables, alerts, procedures) is SOC Shift's own file layout: one POST body per endpoint.",
+  "type": "object",
+  "required": ["case", "observables", "alerts", "procedures"],
+  "additionalProperties": false,
+  "properties": {
+    "case": { "$ref": "#/$defs/InputCase" },
+    "observables": { "type": "array", "items": { "$ref": "#/$defs/InputObservable" } },
+    "alerts": { "type": "array", "items": { "$ref": "#/$defs/InputAlert" } },
+    "procedures": { "type": "array", "items": { "$ref": "#/$defs/InputProcedure" } }
+  },
+  "$defs": {
+    "epochMs": { "type": "integer", "minimum": 0 },
+    "severity": { "enum": [1, 2, 3, 4] },
+    "tlp": { "enum": [0, 1, 2, 3, 4] },
+    "pap": { "enum": [0, 1, 2, 3] },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "customFields": { "anyOf": [{ "type": "array" }, { "type": "object" }] },
+    "InputCase": {
+      "type": "object",
+      "required": ["title", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "startDate": { "$ref": "#/$defs/epochMs" },
+        "endDate": { "$ref": "#/$defs/epochMs" },
+        "tags": { "$ref": "#/$defs/tags" },
+        "flag": { "type": "boolean" },
+        "tlp": { "$ref": "#/$defs/tlp" },
+        "pap": { "$ref": "#/$defs/pap" },
+        "status": { "enum": ["New", "InProgress", "Indeterminate", "FalsePositive", "TruePositive", "Other", "Duplicated"] },
+        "summary": { "type": "string" },
+        "assignee": { "type": "string" },
+        "access": { "type": "object" },
+        "customFields": { "$ref": "#/$defs/customFields" },
+        "caseTemplate": { "type": "string" },
+        "tasks": { "type": "array", "items": { "$ref": "#/$defs/InputTask" } },
+        "pages": { "type": "array" },
+        "sharingParameters": { "type": "array" },
+        "taskRule": { "type": "string" },
+        "observableRule": { "type": "string" }
+      }
+    },
+    "InputAlert": {
+      "type": "object",
+      "required": ["type", "source", "sourceRef", "title", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 },
+        "sourceRef": { "type": "string", "minLength": 1 },
+        "externalLink": { "type": "string" },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "date": { "$ref": "#/$defs/epochMs" },
+        "tags": { "$ref": "#/$defs/tags" },
+        "flag": { "type": "boolean" },
+        "tlp": { "$ref": "#/$defs/tlp" },
+        "pap": { "$ref": "#/$defs/pap" },
+        "customFields": { "$ref": "#/$defs/customFields" },
+        "summary": { "type": "string" },
+        "status": { "type": "string" },
+        "assignee": { "type": "string" },
+        "caseTemplate": { "type": "string" },
+        "observables": { "type": "array", "items": { "$ref": "#/$defs/InputObservable" } },
+        "procedures": { "type": "array", "items": { "$ref": "#/$defs/InputProcedure" } }
+      }
+    },
+    "InputObservable": {
+      "type": "object",
+      "required": ["dataType"],
+      "additionalProperties": false,
+      "properties": {
+        "dataType": { "type": "string", "minLength": 1 },
+        "data": { "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+        "message": { "type": "string" },
+        "startDate": { "$ref": "#/$defs/epochMs" },
+        "attachment": {},
+        "tlp": { "$ref": "#/$defs/tlp" },
+        "pap": { "$ref": "#/$defs/pap" },
+        "tags": { "$ref": "#/$defs/tags" },
+        "ioc": { "type": "boolean" },
+        "sighted": { "type": "boolean" },
+        "sightedAt": { "$ref": "#/$defs/epochMs" },
+        "ignoreSimilarity": { "type": "boolean" },
+        "isZip": { "type": "boolean" },
+        "zipPassword": { "type": "string" }
+      }
+    },
+    "InputTask": {
+      "type": "object",
+      "required": ["title"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "group": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "enum": ["Waiting", "InProgress", "Completed", "Cancel"] },
+        "flag": { "type": "boolean" },
+        "startDate": { "$ref": "#/$defs/epochMs" },
+        "endDate": { "$ref": "#/$defs/epochMs" },
+        "order": { "type": "integer" },
+        "dueDate": { "$ref": "#/$defs/epochMs" },
+        "assignee": { "type": "string" },
+        "mandatory": { "type": "boolean" }
+      }
+    },
+    "InputProcedure": {
+      "type": "object",
+      "required": ["occurDate", "patternId"],
+      "additionalProperties": false,
+      "properties": {
+        "occurDate": { "$ref": "#/$defs/epochMs" },
+        "patternId": { "type": "string", "pattern": "^T\\d{4}(\\.\\d{3})?$" },
+        "tactic": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    }
+  }
+}

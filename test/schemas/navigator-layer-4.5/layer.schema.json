@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/edwardtay/soc-shift/test/schemas/navigator-layer-4.5/layer.schema.json",
+  "title": "ATT&CK Navigator layer, format 4.5",
+  "$comment": "Written for SOC Shift from the property tables in layers/spec/v4.5/layerformat.md of mitre-attack/attack-navigator at commit 734a1caba29fcd51f20b9ca239ce652b3354a47e. MITRE publishes the format as a Markdown table and no JSON Schema. Properties outside the tables are rejected so typos fail the test.",
+  "type": "object",
+  "required": ["name", "domain", "versions"],
+  "additionalProperties": false,
+  "properties": {
+    "versions": {
+      "type": "object",
+      "required": ["navigator", "layer"],
+      "additionalProperties": false,
+      "properties": {
+        "attack": { "type": "string", "pattern": "^\\d+(\\.\\d+)?$" },
+        "navigator": { "type": "string", "pattern": "^(4\\.(9|[1-9]\\d)|[5-9]|\\d{2,})(\\.\\d+)*$", "$comment": "Must be at least 4.9.0" },
+        "layer": { "const": "4.5" }
+      }
+    },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "domain": { "enum": ["enterprise-attack", "mobile-attack", "ics-attack"] },
+    "customDataURL": { "type": "string", "format": "uri" },
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": { "platforms": { "type": "array", "items": { "type": "string" } } }
+    },
+    "sorting": { "enum": [0, 1, 2, 3] },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "layout": { "enum": ["side", "flat", "mini"] },
+        "showID": { "type": "boolean" },
+        "showName": { "type": "boolean" },
+        "showAggregateScores": { "type": "boolean" },
+        "countUnscored": { "type": "boolean" },
+        "aggregateFunction": { "enum": ["average", "min", "max", "sum"] },
+        "expandedSubtechniques": { "enum": ["none", "all", "annotated"] }
+      }
+    },
+    "hideDisabled": { "type": "boolean" },
+    "techniques": { "type": "array", "items": { "$ref": "#/$defs/technique" } },
+    "gradient": {
+      "type": "object",
+      "required": ["colors", "minValue", "maxValue"],
+      "additionalProperties": false,
+      "properties": {
+        "colors": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/color" } },
+        "minValue": { "type": "number" },
+        "maxValue": { "type": "number" }
+      }
+    },
+    "legendItems": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "color"],
+        "additionalProperties": false,
+        "properties": { "label": { "type": "string" }, "color": { "$ref": "#/$defs/color" } }
+      }
+    },
+    "showTacticRowBackground": { "type": "boolean" },
+    "tacticRowBackground": { "$ref": "#/$defs/color" },
+    "selectTechniquesAcrossTactics": { "type": "boolean" },
+    "selectSubtechniquesWithParent": { "type": "boolean" },
+    "selectVisibleTechniques": { "type": "boolean" },
+    "metadata": { "type": "array", "items": { "anyOf": [{ "$ref": "#/$defs/metadata" }, { "$ref": "#/$defs/divider" }] } },
+    "links": { "type": "array", "items": { "anyOf": [{ "$ref": "#/$defs/link" }, { "$ref": "#/$defs/divider" }] } }
+  },
+  "$defs": {
+    "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+    "technique": {
+      "type": "object",
+      "required": ["techniqueID"],
+      "additionalProperties": false,
+      "properties": {
+        "techniqueID": { "type": "string", "pattern": "^T\\d{4}(\\.\\d{3})?$" },
+        "tactic": { "type": "string", "pattern": "^[a-z]+(-[a-z]+)*$" },
+        "comment": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "score": { "type": "number" },
+        "color": { "anyOf": [{ "const": "" }, { "$ref": "#/$defs/color" }] },
+        "metadata": { "type": "array", "items": { "anyOf": [{ "$ref": "#/$defs/metadata" }, { "$ref": "#/$defs/divider" }] } },
+        "links": { "type": "array", "items": { "anyOf": [{ "$ref": "#/$defs/link" }, { "$ref": "#/$defs/divider" }] } },
+        "showSubtechniques": { "type": "boolean" }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "value"],
+      "additionalProperties": false,
+      "properties": { "name": { "type": "string" }, "value": { "type": "string" } }
+    },
+    "link": {
+      "type": "object",
+      "required": ["label", "url"],
+      "additionalProperties": false,
+      "properties": { "label": { "type": "string" }, "url": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9+.-]*://" } }
+    },
+    "divider": {
+      "type": "object",
+      "required": ["divider"],
+      "additionalProperties": false,
+      "properties": { "divider": { "type": "boolean" } }
+    }
+  }
+}

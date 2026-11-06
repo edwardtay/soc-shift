@@ -62,6 +62,30 @@
     add("session", get(ev, "authenticationContext.externalSessionId"));
     add("cloudkey", get(ev, "userIdentity.accessKeyId"));
     add("file", ev.filename);
+    // Microsoft shapes: Entra ID sign-in and audit logs, the Microsoft 365 unified audit log, Defender for Office 365 email events
+    add("user", stripDomain(ev.UserPrincipalName));
+    add("user", stripDomain(ev.UserId));
+    add("user", stripDomain(ev.AccountUpn));
+    add("user", stripDomain(get(ev, "InitiatedBy.user.userPrincipalName")));
+    add("host", get(ev, "DeviceDetail.displayName"));
+    ["IPAddress", "SenderIPv4"].forEach(function (k) { if (isIp(ev[k])) add("ip", ev[k]); });
+    if (isIp(get(ev, "InitiatedBy.user.ipAddress"))) add("ip", get(ev, "InitiatedBy.user.ipAddress"));
+    add("session", ev.SessionId);
+    add("session", get(ev, "AppAccessContext.AADSessionId"));
+    add("app", ev.ClientAppId);
+    var tr = (ev.TargetResources || [])[0];
+    if (tr && tr.type === "ServicePrincipal") {
+      var spn = (tr.modifiedProperties || []).filter(function (p) { return p.displayName === "TargetId.ServicePrincipalNames"; })[0];
+      add("app", spn ? String(spn.newValue).replace(/"/g, "").split(";")[0] : tr.id);
+    }
+    if (ev._src === "email") {
+      var inbound = ev.EmailDirection !== "Outbound";
+      add("user", stripDomain(inbound ? ev.RecipientEmailAddress : ev.SenderFromAddress));
+      add("email", inbound ? ev.SenderFromAddress : ev.RecipientEmailAddress);
+      add("domain", inbound ? ev.SenderFromDomain : ev.RecipientEmailAddress && ev.RecipientEmailAddress.split("@")[1]);
+      add("file", ev.FileName);
+      if (ev.Url && !isIp(hostOf(ev.Url))) add("domain", hostOf(ev.Url));
+    }
     return out;
   }
 
@@ -78,6 +102,10 @@
       case "sse": return ev.action + " " + ev.url + (ev.filename ? " [" + ev.filename + "]" : "") + (ev.bytes_out > 100000 ? " (" + fmtBytes(ev.bytes_out) + " out)" : "");
       case "waf": return ev.SecurityAction + " " + ev.ClientRequestMethod + " " + ev.ClientRequestHost + decodeSafe(ev.ClientRequestPath) + " → " + ev.EdgeResponseStatus + (ev.RequestCount > 1 ? " ×" + ev.RequestCount : "");
       case "idp": return ev.eventType + " " + get(ev, "outcome.result") + (ev.target ? " → " + ev.target[0].displayName : "") + " from " + get(ev, "client.ipAddress") + " (" + get(ev, "securityContext.asOrg") + ")";
+      case "signin": return "sign-in " + (+ev.ResultType === 0 ? "success" : "failure " + ev.ResultType) + " → " + ev.AppDisplayName + " from " + ev.IPAddress + " (AS" + ev.AutonomousSystemNumber + ")" + (ev.ClientAppUsed && ev.ClientAppUsed !== "Browser" ? " via " + ev.ClientAppUsed : "") + (/claim in the token/.test(JSON.stringify(ev.AuthenticationDetails || "")) ? ", MFA from token claim" : "");
+      case "entraaudit": return ev.OperationName + " " + (ev.Result || "") + ((ev.TargetResources || [])[0] && ev.TargetResources[0].type === "ServicePrincipal" ? " → " + ev.TargetResources[0].displayName : "") + " by " + (get(ev, "InitiatedBy.user.userPrincipalName") || "?") + " from " + (get(ev, "InitiatedBy.user.ipAddress") || "?") + (ev.ResultReason ? " (" + ev.ResultReason + ")" : "");
+      case "o365": return ev.Operation + (ev.Operation === "MailItemsAccessed" ? " " + (ev.MailAccessType || "") + " (" + (ev.OperationCount || 1) + " items)" : "") + (get(ev, "Item.Subject") ? ' "' + ev.Item.Subject + '"' : "") + " by " + ev.UserId + " from " + ev.ClientIP + (ev.ClientAppId ? " via app " + ev.ClientAppId : "");
+      case "email": return ev.EmailDirection + " " + ev.DeliveryAction + ": " + ev.SenderFromAddress + " → " + ev.RecipientEmailAddress + ' "' + ev.Subject + '"' + (ev.FileName ? " [" + ev.FileName + "]" : "");
       case "cloud": return ev.eventName + (ev.requestParameters ? " " + ev.requestParameters.bucketName + "/" + ev.requestParameters.key : "") + (ev.errorCode ? " [" + ev.errorCode + "]" : "") + " from " + ev.sourceIPAddress;
     }
     return Object.keys(ev).filter(function (k) { return k[0] !== "_"; }).slice(0, 6).map(function (k) { var v = ev[k]; return k + "=" + (typeof v === "object" ? JSON.stringify(v) : v); }).join(" ");
@@ -99,7 +127,8 @@
     if (platform === "EDR") return ev.DeviceName;
     if (platform === "WAF") return ev.ClientIP;
     if (platform === "SSE") return stripDomain(ev.user);
-    if (platform === "SIEM") return stripDomain(get(ev, "actor.alternateId") || get(ev, "userIdentity.userName"));
+    if (platform === "SIEM") return stripDomain(get(ev, "actor.alternateId") || get(ev, "userIdentity.userName") || ev.UserPrincipalName || ev.UserId || get(ev, "InitiatedBy.user.userPrincipalName"));
+    if (platform === "EMAIL") return stripDomain(ev.RecipientEmailAddress);
     return "-";
   }
   function attackOf(tags) {
@@ -255,7 +284,9 @@
     ],
     package: [{ id: "block-package", label: "Block package in registry proxy", platform: "Artifact proxy", self: true, effect: "Package and version denied for every build." }],
     file: [{ id: "dlp-case", label: "Open DLP case", platform: "SSE", owner: "Data protection", effect: "Data protection contacts the user's manager." }],
-    session: [{ id: "revoke-session", label: "Revoke this session", platform: "IdP", self: true, effect: "Session id invalidated." }]
+    session: [{ id: "revoke-session", label: "Revoke this session", platform: "IdP", self: true, effect: "Session id invalidated." }],
+    app: [{ id: "disable-app", label: "Revoke grants and disable the app", platform: "Entra ID", self: true, effect: "OAuth grants removed and the service principal disabled." }],
+    email: [{ id: "block-sender", label: "Block sender and purge their mail", platform: "Email", self: true, effect: "Sender on the tenant block list; delivered copies removed." }]
   };
   function actionsFor(entity, data) { var o = data && data.actions; return (o && o[entity.type]) || ACTIONS[entity.type] || []; }
   function applyAction(state, caseId, entity, action, nowIso, team) {
@@ -267,7 +298,7 @@
 
   /* ---------- tuning ---------- */
   // Fields tried, per platform, when looking for what separates noise from confirmed alerts.
-  var PREFERRED = { EDR: ["InitiatingProcessFolderPath", "InitiatingProcessSigner"], WAF: ["ClientIP", "ClientRequestHost"], SSE: ["user"], SIEM: ["client.ipAddress"] };
+  var PREFERRED = { EDR: ["InitiatingProcessFolderPath", "InitiatingProcessSigner"], WAF: ["ClientIP", "ClientRequestHost"], SSE: ["user"], SIEM: ["client.ipAddress"], EMAIL: ["SenderFromDomain"] };
   function proposeTuning(ruleDef, alerts, verdicts, data) {
     var evmap = byId(data);
     var mine = alerts.filter(function (a) { return a.ruleId === ruleDef.id; });
@@ -472,8 +503,8 @@
   var PAP = { CLEAR: 0, GREEN: 1, AMBER: 2, RED: 3 };
   var OBS_DEFAULTS = { external: { tlp: "GREEN", pap: "AMBER" }, internal: { tlp: "AMBER+STRICT", pap: "RED" } };
   // TheHive 5 default observable types; DFIR-IRIS default IOC and asset type ids (a fresh install; check yours under Manage).
-  var HIVE_TYPE = { ip: "ip", domain: "domain", host: "hostname", user: "other", customer: "other", session: "other", cloudkey: "other", package: "other", file: "filename", url: "url", hash: "hash" };
-  var IRIS_IOC = { ip: { id: 79, name: "ip-src" }, domain: { id: 20, name: "domain" }, file: { id: 37, name: "filename" }, url: { id: 141, name: "url" }, hash: { id: 113, name: "sha256" }, package: { id: 96, name: "other" } };
+  var HIVE_TYPE = { ip: "ip", domain: "domain", host: "hostname", user: "other", customer: "other", session: "other", cloudkey: "other", package: "other", app: "other", file: "filename", url: "url", hash: "hash", email: "mail" };
+  var IRIS_IOC = { ip: { id: 79, name: "ip-src" }, domain: { id: 20, name: "domain" }, file: { id: 37, name: "filename" }, url: { id: 141, name: "url" }, hash: { id: 113, name: "sha256" }, package: { id: 96, name: "other" }, app: { id: 96, name: "other" }, email: { id: 31, name: "email-src" } };
   var IRIS_ASSET = { account: 1, linux: 4, mac: 6, windows: 9 };
   var IRIS_TLP = { RED: 1, AMBER: 2, GREEN: 3, CLEAR: 4, "AMBER+STRICT": 5 };
   function ipInt(ip) { return String(ip).split(".").reduce(function (n, o) { return n * 256 + +o; }, 0); }
@@ -488,7 +519,8 @@
     if (known.some(function (k) { return e.value === k || (e.type === "domain" && e.value.slice(-k.length - 1) === "." + k); })) return false;
     if (e.type === "ip") return !isInternalIp(e.value, data);
     if (e.type === "domain") return !(data.estate.apps || {})[e.value];
-    return e.type === "package" || e.type === "file" || e.type === "url" || e.type === "hash";
+    if (e.type === "email") { var dom = e.value.split("@")[1] || ""; return !known.some(function (k) { return dom === k || dom.slice(-k.length - 1) === "." + k; }); }
+    return e.type === "package" || e.type === "file" || e.type === "url" || e.type === "hash" || e.type === "app";
   }
   function observables(state, incident, alerts, data) {
     var evmap = byId(data), seen = {}, out = [], over = state.obs || {}, NOISY = {}, cfg = data.observables || {};
@@ -585,6 +617,7 @@
     if (o.type === "file") return "[file:name = '" + q + "']";
     if (o.type === "hash") return "[file:hashes.'SHA-256' = '" + q + "']";
     if (o.type === "package") return "[software:name = '" + q + "']";
+    if (o.type === "email") return "[email-addr:value = '" + q + "']";
     return null;
   }
   function stixBundle(state, alerts, data, attackNames) {

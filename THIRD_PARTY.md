@@ -65,6 +65,14 @@ FITNESS FOR A PARTICULAR PURPOSE.
 
 The Sigma rules, correlations and hunts in `app/scenarios/` are original to this project and MIT licensed with it. No rules from the SigmaHQ repository are bundled, so the Detection Rule License (DRL) does not apply. A scenario that adds SigmaHQ rules must keep their DRL 1.1 attribution (author and rule link) in the rule and list them here.
 
+## OASIS STIX 2.1 JSON schemas
+
+`test/schemas/stix2.1/` is the `schemas/` folder of https://github.com/oasis-open/cti-stix2-json-schemas at commit 9af1db41b7b86c06324f899649ae83480134f66e, copied unchanged. The tests use it to validate the STIX export; the page does not load it. BSD 3-Clause licence, kept in `test/schemas/stix2.1/LICENSE`. The other schemas in `test/schemas/` were written for this project; their sources are listed in `test/schemas/README.md`.
+
+## Contributor Covenant
+
+`CODE_OF_CONDUCT.md` is the Contributor Covenant, version 2.1 (https://www.contributor-covenant.org/version/2/1/code_of_conduct.html), used under CC BY 4.0, with this project's reporting channel filled in.
+
 ## Public services
 
 Live lookups call public services from the user's browser: OSV (api.osv.dev), IANA RDAP bootstrap files and the regional internet registries' RDAP servers (with rdap.org as fallback), Cloudflare DNS over HTTPS, the Tor Project's Onionoo API, and CISA's Known Exploited Vulnerabilities catalogue from the cisagov/kev-data repository. Their data stays under their own terms.

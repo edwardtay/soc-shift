@@ -54,14 +54,15 @@
   function visEvents(ids) { var n = simIso(); return ids.map(function (id) { return EVMAP[id]; }).filter(function (e) { return e._t <= n; }); }
   function plural(n, w) { return n + " " + w + (n === 1 ? "" : "s"); }
   function sev(l) { return '<span class="sev ' + h(l) + '">' + h(l) + "</span>"; }
-  function srcb(s) { return '<span class="srcb src-' + s + '">' + { edr: "EDR", sse: "SSE", waf: "WAF", idp: "SIEM·IdP", cloud: "SIEM·Cloud" }[s] + "</span>"; }
+  var SRC_LABEL = { edr: "EDR", sse: "SSE", waf: "WAF", idp: "SIEM·IdP", cloud: "SIEM·Cloud", signin: "SIEM·Entra", entraaudit: "SIEM·Audit", o365: "SIEM·M365", email: "Email" };
+  function srcb(s) { return '<span class="srcb src-' + h(s) + '">' + h(SRC_LABEL[s] || String(s).toUpperCase()) + "</span>"; }
   function att(id) { return '<span class="sd-tag att" title="MITRE ATT&CK' + (ATT_VER ? " v" + h(ATT_VER) : "") + '">' + h(id) + (ATT[id] ? " " + h(ATT[id]) : "") + "</span>"; }
   function vtag(v) { return v ? '<span class="sd-tag v-' + v.verdict + '">' + { tp: "True positive", fp: "False positive", benign: "Benign TP", escalate: "Escalated" }[v.verdict] + "</span>" : '<span class="sd-tag">Untriaged</span>'; }
   function toast(msg) { var t = $("#toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(t._h); t._h = setTimeout(function () { t.classList.remove("on"); }, 2600); }
   function incList() { return Object.keys(state.incidents).map(function (k) { return state.incidents[k]; }); }
   function nextIncId() { var n = 1; while (state.incidents["INC-" + String(n).padStart(3, "0")]) n++; return "INC-" + String(n).padStart(3, "0"); }
   var OWNERS = DATA.owners;
-  var ENT_LABEL = { user: "user", host: "host", ip: "ip", domain: "domain", package: "npm", customer: "customer", session: "session", cloudkey: "aws key", file: "file" };
+  var ENT_LABEL = { user: "user", host: "host", ip: "ip", domain: "domain", package: "npm", customer: "customer", session: "session", cloudkey: "aws key", file: "file", app: "oauth app", email: "email" };
   function entChip(e) { return '<button class="ent" data-ent="' + h(e.type) + "|" + h(e.value) + '"><span class="k">' + h(ENT_LABEL[e.type] || e.type) + '</span><span class="v">' + h(e.value) + "</span></button>"; }
 
   /* ---------- chrome ---------- */

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0 (2026-11-06)
+
+- Second scenario, Larkspur Metrics (EMEA shift on Microsoft 365 and Entra ID): an adversary-in-the-middle phish steals a session, then a new MFA method, an inbox rule that hides replies, an OAuth consent for mail and fake bank-detail mail to two customers. 49 events, 6 original Sigma rules, 1 correlation, 15 alerts, 4 hunts, full answer key, carried-in case with a pending ticket, seeded variants. No real-world anchors.
+- Engine: four new log shapes with summaries and entity extraction (Entra ID sign-in logs, Entra ID audit logs, the Microsoft 365 unified audit log, Defender for Office 365 email events), an `EMAIL` platform, and `email` and `app` (OAuth application) entities with built-in actions and TheHive, DFIR-IRIS and STIX mappings.
+- Export validation in `npm test`: every STIX bundle, Navigator layer, TheHive case and DFIR-IRIS alert for both scenarios and seeds 0, 7, 12345 and 31337 is checked against JSON schemas in `test/schemas/` (the OASIS STIX 2.1 schemas, and schemas written from the Navigator 4.5 specification, thehive4py 2.1.0 and iris-web 2.4.29), with a dependency-free validator in `test/jsonschema.mjs`.
+- `tools/grade-verdicts.mjs` grades a learner's NDJSON verdict export against the answer key for their seed.
+- docs/INSTRUCTORS.md: session plan, seeds per learner, rubric, discussion questions per scenario, collecting results.
+- Repository: code of conduct (Contributor Covenant 2.1), CITATION.cff, pull request template, Dependabot for GitHub Actions, OpenSSF Scorecard and CodeQL workflows pinned to full commit SHAs, least-privilege permissions on every workflow (Pages write scopes moved to the deploy job), and a test that checks all of it.
+- `npm run validate` covers both scenarios and seeds 7, 12345 and 31337. The page's scenario picker lists both scenarios.
+- README: badges, scenarios table, "Why trust the content", and a social preview image in docs/media.
+
 ## 0.2.0 (2026-11-06)
 
 Ported from the SOC Shift Desk on pwnsy.com (pwnsy commits de87469 and 1619a01) into this repository's scenario format.

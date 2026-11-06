@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use SOC Shift in teaching or research, please cite it as below."
+type: software
+title: "SOC Shift"
+abstract: "A browser-based SOC analyst shift simulator: handover, Sigma and correlation alert triage, pivoting, response, hunting, tuning with a regression check, handover out, and case exports for TheHive, DFIR-IRIS, STIX 2.1 and ATT&CK Navigator, graded against an answer key. Scenarios are synthetic."
+authors:
+  - given-names: "Edward"
+    family-names: "Tay"
+version: "0.3.0"
+date-released: "2026-11-06"
+license: MIT
+repository-code: "https://github.com/edwardtay/soc-shift"
+url: "https://edwardtay.github.io/soc-shift/"
+keywords:
+  - security operations
+  - SOC
+  - Sigma
+  - detection engineering
+  - incident response
+  - threat hunting
+  - training

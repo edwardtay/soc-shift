@@ -11,6 +11,7 @@ and is listed in `app/scenarios/index.js`:
 ```js
 window.SOC_SCENARIO_CATALOG = [
   { id: "kestrel-ledger", title: "Kestrel Ledger: APAC shift, 2026-11-05" },
+  { id: "larkspur-metrics", title: "Larkspur Metrics: EMEA shift, 2026-11-12" },
   { id: "your-scenario", title: "Your title" }
 ];
 ```
@@ -28,7 +29,7 @@ The first entry opens by default. `index.html?scenario=<id>` opens another, and 
 })(typeof window !== "undefined" ? window : globalThis);
 ```
 
-Copy `app/scenarios/kestrel-ledger/scenario.js` as a starting point.
+Copy one of the bundled scenarios as a starting point: `app/scenarios/kestrel-ledger/scenario.js` (EDR, web proxy, WAF, Okta and CloudTrail) or `app/scenarios/larkspur-metrics/scenario.js` (Microsoft 365, Entra ID, Defender for Office 365 and Defender for Endpoint).
 
 ## Schema
 
@@ -70,7 +71,7 @@ One object per event. Two metadata keys start with an underscore and are hidden 
 
 - `_t` is UTC ISO time ending in `Z`. Keep the file sorted by `_t`; the validator fails an unsorted timeline.
 - Events before `estate.shift.startUtc` are context: they show in timelines and hunts and never raise a Sigma alert.
-- `_src` picks the log shape. The desk understands five shapes for one-line summaries and entity extraction:
+- `_src` picks the log shape. The desk understands nine shapes for one-line summaries and entity extraction:
 
 | `_src` | Shape | Fields the desk reads |
 | --- | --- | --- |
@@ -79,10 +80,16 @@ One object per event. Two metadata keys start with an underscore and are hidden 
 | `waf` | Cloudflare style firewall event | `ClientIP`, `ClientRequestHost`, `ClientRequestMethod`, `ClientRequestPath`, `EdgeResponseStatus`, `SecurityAction`, `RequestCount`, `CustomerId` |
 | `idp` | Okta System Log | `eventType`, `actor.alternateId`, `client.ipAddress`, `securityContext.asOrg`, `outcome.result`, `target[0].displayName`, `authenticationContext.externalSessionId` |
 | `cloud` | AWS CloudTrail | `eventName`, `userIdentity.userName`, `userIdentity.accessKeyId`, `sourceIPAddress`, `requestParameters`, `errorCode` |
+| `signin` | Microsoft Entra ID sign-in logs (`SigninLogs`) | `UserPrincipalName`, `AppDisplayName`, `ClientAppUsed`, `IPAddress`, `AutonomousSystemNumber`, `ResultType`, `SessionId`, `AuthenticationDetails`, `DeviceDetail.displayName` |
+| `entraaudit` | Microsoft Entra ID audit logs (`AuditLogs`) | `OperationName`, `Result`, `ResultReason`, `InitiatedBy.user.userPrincipalName`, `InitiatedBy.user.ipAddress`, `TargetResources` (a `ServicePrincipal` target gives the app id from its `TargetId.ServicePrincipalNames` property) |
+| `o365` | Microsoft 365 unified audit log (`OfficeActivity`) | `Operation`, `UserId`, `ClientIP`, `ClientAppId`, `Parameters` (a JSON string, as the log stores it), `AppAccessContext.AADSessionId`, `MailAccessType`, `OperationCount`, `Item.Subject` |
+| `email` | Defender for Office 365 email events (`EmailEvents` with the attachment `FileName` and the `Url` joined in) | `EmailDirection`, `DeliveryAction`, `SenderFromAddress`, `SenderFromDomain`, `SenderIPv4`, `RecipientEmailAddress`, `Subject`, `FileName`, `Url` |
 
 Any other `_src` works too: Sigma matches every field, and the summary falls back to the first few `key=value` pairs. Give an event `_summary` to set its one-line summary yourself.
 
-Entities the desk extracts for pivoting: `user`, `host`, `ip`, `domain`, `package` (from `PackageName`), `customer` (`CustomerId`), `session` (`authenticationContext.externalSessionId`), `cloudkey` (`userIdentity.accessKeyId`) and `file` (`filename`).
+Entities the desk extracts for pivoting: `user`, `host`, `ip`, `domain`, `package` (from `PackageName`), `customer` (`CustomerId`), `session` (`authenticationContext.externalSessionId`, `SessionId`, `AppAccessContext.AADSessionId`), `cloudkey` (`userIdentity.accessKeyId`), `file` (`filename`, and `FileName` on email), `email` (the external party of an email event: the sender inbound, the recipient outbound) and `app` (an OAuth application id from `ClientAppId` or an Entra audit target).
+
+The session ids are what tie Microsoft logs together: `AppAccessContext.AADSessionId` on a unified audit log record is the `SessionId` of the Entra sign-in that made it, so an inbox rule pivots back to the stolen session.
 
 ### Rules
 
@@ -104,8 +111,8 @@ tags: [attack.execution, attack.t1059.001]` }
 
 - `yaml` is a Sigma rule. sigma.js supports the Sigma 2.0 detection spec: field maps and lists, wildcards, `contains`, `startswith`, `endswith`, `all`, `re`, `exists`, `cidr`, `gt`/`gte`/`lt`/`lte`, `fieldref`, `windash`, `base64`/`base64offset`, `wide`, and conditions with `and`, `or`, `not`, brackets, `1 of x*`, `all of x*` and `them`. Nested fields use dots (`outcome.result`). Inside a JavaScript template literal, write a single backslash as `\\`.
 - Every rule needs a `level` and at least one `attack.tNNNN` tag that exists in the bundled ATT&CK snapshot.
-- `platform` is `EDR`, `SSE`, `WAF` or `SIEM` and sets how alerts group: one alert per host (EDR), source IP (WAF), user (SSE) or user (SIEM). Set `groupBy: "<field path>"` to group on something else. Several matching events with the same group key make one alert.
-- `tuningNote` is the comment appended to a tuning proposal. `tuningFields` overrides the fields the tuner tries for this rule (defaults: EDR `InitiatingProcessFolderPath`, `InitiatingProcessSigner`; WAF `ClientIP`, `ClientRequestHost`; SSE `user`; SIEM `client.ipAddress`).
+- `platform` is `EDR`, `SSE`, `WAF`, `SIEM` or `EMAIL` and sets how alerts group: one alert per host (EDR), source IP (WAF), user (SSE and SIEM) or recipient (EMAIL). Set `groupBy: "<field path>"` to group on something else, as Larkspur Metrics does to group a phish by sender domain and a password spray by source address. Several matching events with the same group key make one alert.
+- `tuningNote` is the comment appended to a tuning proposal. `tuningFields` overrides the fields the tuner tries for this rule (defaults: EDR `InitiatingProcessFolderPath`, `InitiatingProcessSigner`; WAF `ClientIP`, `ClientRequestHost`; SSE `user`; SIEM `client.ipAddress`; EMAIL `SenderFromDomain`). Every field in a proposal must match for the filter to apply, so two fields make a narrower filter.
 
 ### Correlations
 
@@ -185,7 +192,7 @@ Acknowledging the handover turns each `kind: "case"` item into an open incident 
 
 ### Response actions
 
-Built-in actions exist for `host` (isolate, triage package), `ip` (block on SSE, block on WAF), `domain`, `user` (revoke sessions, disable, password and MFA reset), `cloudkey`, `customer`, `package`, `file` and `session`. To replace the list for a type:
+Built-in actions exist for `host` (isolate, triage package), `ip` (block on SSE, block on WAF), `domain`, `user` (revoke sessions, disable, password and MFA reset), `cloudkey`, `customer`, `package`, `file`, `session`, `app` (revoke grants and disable) and `email` (block sender and purge). To replace the list for a type:
 
 ```js
 actions: {
@@ -292,7 +299,7 @@ The validator checks:
 - no real-looking personal data: email addresses must use reserved example domains (`.example`, `example.com`), IPv4 addresses must be private, CGNAT, documentation ranges or listed in `anchors.ips`, AWS key ids must contain `EXAMPLE`, and there are no Luhn-valid card-like numbers or phone numbers
 - no em or en dashes
 
-`npm test` runs the validator on every folder under `app/scenarios/`, and on Kestrel Ledger with seeds 7, 12345 and 31337.
+`npm test` runs the validator on every folder under `app/scenarios/`, and on every scenario with a `variants` block at seeds 7, 12345 and 31337. It also checks every export of every scenario against the schemas in `test/schemas/`, so a new log shape or entity type that breaks an export fails there. `npm run validate` runs the validator on the bundled scenarios and seeds; add a new scenario's folder to that script in `package.json`.
 
 ## Writing tips
 

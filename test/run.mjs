@@ -1,11 +1,13 @@
-// npm test: engine checks against the Kestrel Ledger answer key, the verdict export, every scenario
-// through the validator, and repository hygiene. Node 18+, no dependencies.
+// npm test: engine checks against the Kestrel Ledger and Larkspur Metrics answer keys, the verdict export, every export
+// against its schema, every scenario through the validator, and repository hygiene. Node 18+, no dependencies.
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { validate } from "../tools/validate-scenario.mjs";
+import { createValidator } from "./jsonschema.mjs";
+import { gradeNdjson } from "../tools/grade-verdicts.mjs";
 
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -280,6 +282,115 @@ fs.writeFileSync(path.join(brokenDir, "scenario.js"), unsorted);
 ok(validate(brokenDir).some((x) => !x.ok && /timeline sorted/.test(x.msg)), "validator flags an unsorted timeline");
 fs.rmSync(tmp, { recursive: true, force: true });
 
+for (const f of folders.filter((x) => x !== "kestrel-ledger")) {
+  const s0 = require(path.join(scnDir, f, "scenario.js"));
+  if (!s0.variants) continue;
+  for (const seed of [7, 12345, 31337]) {
+    const r = validate(path.join(scnDir, f), { seed });
+    r.filter((x) => !x.ok).forEach((x) => ok(false, f + " seed " + seed + ": " + x.msg));
+    ok(r.length > 50 && r.every((x) => x.ok), "validator passes on " + f + " seed " + seed + " (" + r.length + " checks)");
+  }
+}
+
+section("microsoft 365 scenario");
+{
+  const L = require(P("app/scenarios/larkspur-metrics/scenario.js"));
+  const ld = SOC.load(L); SOC.indexEntities(ld);
+  const la = SOC.runDetections(ld);
+  const has = (ev, t, v) => ev._ents.some((e) => e.type === t && e.value === v);
+  const consent = ld.events.find((e) => e.OperationName === "Consent to application" && /d\.moreau/.test(JSON.stringify(e)));
+  ok(has(consent, "app", "8c1f6e2a-4b7d-4e19-a2c5-3f9d0b6e71a4") && has(consent, "user", "d.moreau") && has(consent, "ip", "198.51.100.61"), "Entra audit consent: the app id comes from TargetId.ServicePrincipalNames, with the user and address");
+  const phish = ld.events.find((e) => e._src === "email" && e.RecipientEmailAddress === "d.moreau@larkspur.example" && e.FileName);
+  ok(has(phish, "user", "d.moreau") && has(phish, "email", "billing@northpay-remit.example") && has(phish, "domain", "northpay-remit.example") && has(phish, "domain", "auth.larkspur-docs.example") && has(phish, "file", "Remittance_88231.html") && has(phish, "ip", "192.0.2.140"), "inbound email: recipient, sender, sender domain, URL domain, attachment, sender IP");
+  const outb = ld.events.find((e) => e._src === "email" && e.EmailDirection === "Outbound");
+  ok(has(outb, "user", "d.moreau") && has(outb, "email", "ap@harborline.example") && !has(outb, "user", "ap"), "outbound email: the sender is the user and the recipient is the external party");
+  const rule = ld.events.find((e) => e.Operation === "New-InboxRule" && e.UserId.startsWith("d.moreau"));
+  ok(has(rule, "session", "c7e21f9a-3b64-4d0e-8a52-f19d06b7e3c4") && has(rule, "user", "d.moreau"), "unified audit log: AppAccessContext.AADSessionId links the inbox rule to the stolen sign-in session");
+  const si = ld.events.find((e) => e._src === "signin" && e.IPAddress === "100.64.40.10" && e.UserPrincipalName.startsWith("d.moreau"));
+  ok(has(si, "host", "LM-WIN-0217") && has(si, "session", "a1c95e40-7f2b-4d86-9e13-5b0d8c2f4a71"), "Entra sign-in: device name and session id");
+  ok(["signin", "entraaudit", "o365", "email"].every((src) => ld.events.filter((e) => e._src === src).every((e) => !/undefined/.test(SOC.summarize(e)))), "every Microsoft event has a one-line summary with no gaps");
+  ok(la.length === Object.keys(L.answers).length && la.length === 15, "15 alerts, all in the answer key");
+  ok(la.filter((a) => a.kind === "correlation").map((a) => a.id).sort().join() === "C-ENT-001|d.moreau,C-ENT-001|s.ito", "the session correlation fires for the stolen session and the traveller");
+  ok(la.find((a) => a.id === "R-MAIL-001|northpay-remit.example").events.length === 3, "the phish alert groups the second wave by sender domain (the first wave was before the shift)");
+  ok(la.every((a) => a.platform !== "EMAIL" || Date.parse(a.at) - Date.parse(a.first) === 2 * 60000), "EMAIL alerts arrive after their 2-minute delay");
+  const lv = {}; for (const [k, v] of Object.entries(L.answers)) lv[k] = { verdict: v.verdict };
+  const t4 = SOC.proposeTuning(ld.rules.find((r) => r.id === "R-ENT-004"), la, lv, ld);
+  ok(t4.filter.UserPrincipalName.join() === "svc-scan@larkspur.example" && t4.filter.ClientAppUsed.join() === "Authenticated SMTP" && t4.lostTp.length === 0 && /IT-7713/.test(t4.yaml), "printer tuning filters the service account and protocol, keeps the spray, and carries the ticket");
+  ok(/No field separates/.test(SOC.proposeTuning(ld.rules.find((r) => r.id === "R-EDR-101"), la, lv, ld).error), "the HTML-attachment rule refuses an automatic tune (the bank mail and the lure look the same)");
+  const lst = SOC.answerKeyState(ld, la);
+  ok(SOC.grade(lst, la, ld).score === 15 && SOC.lintHandover(lst, la, "14:40", ld).length === 0, "answer-key shift grades 15 of 15 and lints clean");
+  const lb = SOC.stixBundle(lst, la, ld, names);
+  ok(lb.objects.some((o) => o.pattern === "[email-addr:value = 'billing@northpay-remit.example']") && lb.objects.some((o) => o.pattern === "[domain-name:value = 'auth.larkspur-docs.example']"), "STIX bundle carries the phish sender and the proxy domain");
+  ok(!lb.objects.some((o) => o.type === "indicator" && /larkspur\.example'|harborline|1b9e4c7d/.test(o.pattern)), "company addresses, customers and the approved app are never indicators");
+  const lobs = Object.values(lst.incidents).flatMap((i) => SOC.observables(lst, i, la, ld));
+  const iris = SOC.irisAlert(lst, la.find((a) => a.id === "R-MAIL-001|northpay-remit.example"), ld, lobs);
+  ok(iris.alert_iocs.some((i) => i.ioc_value === "billing@northpay-remit.example" && i.ioc_type_id === 31), "DFIR-IRIS exports the sender as email-src (type 31)");
+  const hc = SOC.theHiveCase(lst, lst.incidents["INC-1"], la, ld);
+  ok(hc.observables.some((o) => o.dataType === "other" && o.data === "8c1f6e2a-4b7d-4e19-a2c5-3f9d0b6e71a4" && o.ioc) && SOC.theHiveCase(lst, lst.incidents["CASE-2093"], la, ld).observables.some((o) => o.dataType === "mail"), "TheHive exports the OAuth app as an IOC and the sender as mail");
+  const pend = SOC.acknowledge(SOC.newState(), ld, "2026-11-12T06:05:00Z");
+  ok(pend.actions.length === 1 && pend.actions[0].owner === "Messaging team" && pend.incidents["CASE-2093"].ticket === "MSG-118", "acknowledging carries in CASE-2093 with MSG-118 pending");
+  ok(SOC.actionsFor({ type: "app" }, ld)[0].owner === "Identity and access" && SOC.actionsFor({ type: "app" }, data)[0].self === true, "scenario actions replace the built-in ones per entity type");
+}
+
+section("export schemas");
+const SCHEMA = (...f) => P("test/schemas", ...f);
+const JV = createValidator();
+const schemaFiles = walk(P("test/schemas")).filter((f) => f.endsWith(".json"));
+const unknownKw = schemaFiles.flatMap((f) => JV.audit(f).map((k) => path.relative(ROOT, f) + " " + k));
+ok(schemaFiles.length >= 60 && !unknownKw.length, schemaFiles.length + " schema files use only keywords the validator implements" + (unknownKw.length ? ": " + unknownKw.slice(0, 5).join(", ") : ""));
+const prov = fs.readFileSync(SCHEMA("README.md"), "utf8");
+ok(["9af1db41b7b86c06324f899649ae83480134f66e", "734a1caba29fcd51f20b9ca239ce652b3354a47e", "6a4765c39a65c328032343923de866ab4ad10127", "340ce04080806a83837b713d01ea70632ee2b3f7"].every((c) => prov.includes(c)), "schema provenance records each source commit");
+ok(/Redistribution and use in source and binary forms/.test(fs.readFileSync(SCHEMA("stix2.1/LICENSE"), "utf8")), "the OASIS schemas keep their BSD licence");
+const XS = { stix: SCHEMA("stix2.1/common/bundle.json"), layer: SCHEMA("navigator-layer-4.5/layer.schema.json"), hive: SCHEMA("thehive5/case-export.schema.json"), iris: SCHEMA("dfir-iris/alert.schema.json") };
+let exportsChecked = 0;
+for (const f of folders) {
+  const base = require(path.join(scnDir, f, "scenario.js"));
+  for (const seed of base.variants ? [0, 7, 12345, 31337] : [0]) {
+    const d = SOC.load(SOC.variant(base, seed)); SOC.indexEntities(d);
+    const al = SOC.runDetections(d), st2 = SOC.answerKeyState(d, al);
+    const incs2 = Object.values(st2.incidents), obs2 = incs2.flatMap((i) => SOC.observables(st2, i, al, d));
+    const errs = [];
+    const run = (what, value, schema) => { exportsChecked++; JV.validate(value, schema).slice(0, 3).forEach((e) => errs.push(what + " " + e)); };
+    run("STIX bundle", SOC.stixBundle(st2, al, d, names), XS.stix);
+    run("Navigator layer", SOC.navigatorLayer(st2, al, d, attack.version), XS.layer);
+    incs2.forEach((i) => run("TheHive case " + i.id, SOC.theHiveCase(st2, i, al, d), XS.hive));
+    al.forEach((a) => run("DFIR-IRIS alert " + a.id, SOC.irisAlert(st2, a, d, obs2), XS.iris));
+    const nd = SOC.verdictExport(st2, al).trim().split("\n");
+    ok(nd.length === al.length && nd.every((l) => { try { const o = JSON.parse(l); return o.alert_id && o.disposition; } catch (e) { return false; } }), f + " seed " + seed + ": NDJSON verdicts parse, one per alert");
+    ok(!errs.length, f + " seed " + seed + ": STIX, Navigator, TheHive and DFIR-IRIS exports match their schemas" + (errs.length ? ": " + errs.slice(0, 4).join(" | ") : ""));
+  }
+}
+{
+  // the schemas catch broken exports
+  const good = SOC.stixBundle(s3, alerts, data, names);
+  const badInd = JSON.parse(JSON.stringify(good)); delete badInd.objects.find((o) => o.type === "indicator").pattern;
+  ok(JV.validate(badInd, XS.stix).length > 0, "STIX schema rejects an indicator without a pattern");
+  const badId = JSON.parse(JSON.stringify(good)); badId.objects[0].id = "identity--not-a-uuid";
+  ok(JV.validate(badId, XS.stix).length > 0, "STIX schema rejects a malformed identifier");
+  const lay = SOC.navigatorLayer(s3, alerts, data, attack.version); lay.versions.layer = "4.4"; lay.techniques[0].techniqueID = "1059";
+  ok(JV.validate(lay, XS.layer).length >= 2, "layer schema rejects the wrong format version and a bad technique id");
+  const hc = SOC.theHiveCase(s3, incA, alerts, data); hc.case.severity = 5; hc.observables[0].iocc = true;
+  ok(JV.validate(hc, XS.hive).length >= 2, "TheHive schema rejects an out-of-range severity and an unknown key");
+  const ia = SOC.irisAlert(s3, alerts[0], data, allObs); delete ia.alert_title; ia.alert_tags = ["a"];
+  ok(JV.validate(ia, XS.iris).length >= 2, "DFIR-IRIS schema rejects a missing title and list-shaped tags");
+}
+
+section("instructor grading");
+{
+  const L = require(P("app/scenarios/larkspur-metrics/scenario.js"));
+  const lv = SOC.load(SOC.variant(L, 4021)); SOC.indexEntities(lv);
+  const la = SOC.runDetections(lv), lst = SOC.answerKeyState(lv, la);
+  const nd = SOC.verdictExport(lst, la);
+  const full = gradeNdjson(P("app/scenarios/larkspur-metrics"), 4021, nd);
+  ok(full.score === la.length && full.total === la.length && !full.untriaged.length && !full.unknown.length, "an answer-key NDJSON export grades full marks on its own seed (" + full.score + "/" + full.total + ")");
+  const wrongSeed = gradeNdjson(P("app/scenarios/larkspur-metrics"), 7, nd);
+  ok(wrongSeed.unknown.length > 0 && wrongSeed.score < wrongSeed.total, "grading with the wrong seed reports alert ids it does not know");
+  const lines = nd.trim().split("\n").map((l) => JSON.parse(l));
+  lines[0].verdict = lines[0].verdict === "fp" ? "tp" : "fp"; lines[1].reason = "ok"; lines.pop();
+  const part = gradeNdjson(P("app/scenarios/larkspur-metrics"), 4021, lines.map((l) => JSON.stringify(l)).join("\n"));
+  ok(part.score === la.length - 2 && part.misses.length === 1 && part.untriaged.length === 1 && part.noReason.length === 1, "a wrong call, a missing alert and a thin reason each show up");
+}
+
 section("app wiring");
 const page = fs.readFileSync(P("app/index.html"), "utf8");
 const refs = [...page.matchAll(/(?:src|href)="([^"#:]+)"/g)].map((m) => m[1]).filter((r) => r !== "./");
@@ -300,16 +411,35 @@ const pkg = JSON.parse(fs.readFileSync(P("package.json"), "utf8"));
 ok(!pkg.dependencies && !pkg.devDependencies, "package.json has no dependencies");
 const pages = fs.readFileSync(P(".github/workflows/pages.yml"), "utf8");
 ok(/path:\s*app\b/.test(pages) && fs.existsSync(P("app/index.html")), "Pages workflow uploads the app folder");
-for (const wf of ["test.yml", "pages.yml"]) {
+const workflows = fs.readdirSync(P(".github/workflows")).filter((f) => /\.ya?ml$/.test(f));
+ok(["test.yml", "pages.yml", "scorecard.yml", "codeql.yml"].every((f) => workflows.includes(f)), "test, pages, scorecard and codeql workflows exist (" + workflows.join(", ") + ")");
+for (const wf of workflows) {
   const y = fs.readFileSync(P(".github/workflows", wf), "utf8");
   const uses = [...y.matchAll(/uses:\s*(\S+)/g)].map((m) => m[1]);
   ok(uses.length && uses.every((u) => /@[0-9a-f]{40}$/.test(u)), wf + " pins every action to a commit SHA");
+  ok([...y.matchAll(/uses:\s*\S+@[0-9a-f]{40}(.*)$/gm)].every((m) => /^ # v\d+\.\d+\.\d+$/.test(m[1])), wf + " names the release beside each pinned SHA");
+  const top = y.split(/^jobs:/m)[0];
+  ok(/^permissions:/m.test(top) && !/:\s*write/.test(top), wf + " declares top-level permissions with no write access");
+  const jobs = y.split(/^jobs:/m)[1] || "";
+  ok(!/write-all/.test(y) && (jobs.match(/:\s*write/g) || []).length === (jobs.match(/^\s+(contents|pages|id-token|security-events|actions|checks|issues|pull-requests|statuses|packages|deployments|attestations): write$/gm) || []).length, wf + " grants write scopes only per job, by name");
 }
+const dep = fs.readFileSync(P(".github/dependabot.yml"), "utf8");
+ok(/package-ecosystem:\s*"?github-actions"?/.test(dep) && /interval:\s*"?weekly"?/.test(dep), "Dependabot watches the pinned actions weekly");
+for (const f of ["CODE_OF_CONDUCT.md", "CITATION.cff", "SECURITY.md", "CONTRIBUTING.md", ".github/pull_request_template.md", "docs/INSTRUCTORS.md"]) ok(fs.existsSync(P(f)), f + " exists");
+const cff = fs.readFileSync(P("CITATION.cff"), "utf8");
+ok(new RegExp("^version: \"?" + pkg.version.replace(/\./g, "\\.") + "\"?$", "m").test(cff) && /^license: MIT$/m.test(cff) && /repository-code: "https:\/\/github\.com\/edwardtay\/soc-shift"/.test(cff), "CITATION.cff matches package.json " + pkg.version + ", MIT, and the repository");
+ok(fs.readFileSync(P("CHANGELOG.md"), "utf8").includes("## " + pkg.version + " "), "CHANGELOG has an entry for " + pkg.version);
+ok(!/@[a-z0-9.-]+\.(com|org|net|io)\b/i.test(fs.readFileSync(P("CODE_OF_CONDUCT.md"), "utf8")), "the code of conduct names no personal email address");
+const readme = fs.readFileSync(P("README.md"), "utf8");
+ok(folders.every((f) => readme.includes("?scenario=" + f) || readme.includes("app/scenarios/" + f)), "README lists every scenario");
+ok(/actions\/workflows\/test\.yml\/badge\.svg/.test(readme) && /api\.scorecard\.dev\/projects\/github\.com\/edwardtay\/soc-shift\/badge/.test(readme), "README shows the test and Scorecard badges");
+const media = P("docs/media/social-preview.png");
+if (fs.existsSync(media)) { const b = fs.readFileSync(media); ok(b.length < 1048576 && b.readUInt32BE(16) === 1280 && b.readUInt32BE(20) === 640, "social preview is a 1280x640 PNG under 1 MB"); }
 function walk(d, out = []) {
   for (const f of fs.readdirSync(d)) {
     if ([".git", "node_modules", ".src"].includes(f)) continue;
     const full = path.join(d, f), s = fs.statSync(full);
-    if (s.isDirectory()) walk(full, out); else if (/\.(js|mjs|cjs|json|css|html|md|yml|yaml|svg|txt|py|sh)$|^(LICENSE|NOTICE|\.gitignore)$/.test(f)) out.push(full);
+    if (s.isDirectory()) walk(full, out); else if (/\.(js|mjs|cjs|json|css|html|md|yml|yaml|svg|txt|py|sh|cff)$|^(LICENSE|NOTICE|\.gitignore)$/.test(f)) out.push(full);
   }
   return out;
 }
@@ -321,9 +451,10 @@ const traced = files.filter((f) => !/\.min\.js$/.test(f) && trace.test(fs.readFi
 ok(!traced.length, "no private-context traces (employers, applications, personal sites)" + (traced.length ? ": " + traced.map((f) => path.relative(ROOT, f)).join(", ") : ""));
 const appFiles = files.filter((f) => f.startsWith(P("app")) && !f.includes(path.sep + "vendor" + path.sep));
 ok(!appFiles.some((f) => /edward tay/i.test(fs.readFileSync(f, "utf8"))), "the app itself names no person");
-const prose = files.filter((f) => /\.md$/.test(f) || f.endsWith("index.html"));
+// CODE_OF_CONDUCT.md is the Contributor Covenant 2.1 text, kept verbatim
+const prose = files.filter((f) => (/\.md$/.test(f) || f.endsWith("index.html")) && !f.endsWith("CODE_OF_CONDUCT.md"));
 const anti = prose.filter((f) => /\bnot just\b|\bnot only\b|it is not about/i.test(fs.readFileSync(f, "utf8")));
 ok(!anti.length, "no 'not just' or 'not only' in docs and the page" + (anti.length ? ": " + anti.map((f) => path.relative(ROOT, f)).join(", ") : ""));
 
-console.log((n - failed) + "/" + n + " checks passed (" + scn.rules.length + " Sigma rules, " + scn.correlations.length + " correlations, " + alerts.length + " alerts, " + scn.hunts.length + " hunts, " + folders.length + " scenario" + (folders.length > 1 ? "s" : "") + ")");
+console.log((n - failed) + "/" + n + " checks passed (" + folders.length + " scenario" + (folders.length > 1 ? "s" : "") + ", " + exportsChecked + " exports checked against their schemas)");
 process.exit(failed ? 1 : 0);

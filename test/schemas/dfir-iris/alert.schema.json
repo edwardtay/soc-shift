@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/edwardtay/soc-shift/test/schemas/dfir-iris/alert.schema.json",
+  "title": "DFIR-IRIS alert create body",
+  "$comment": "DFIR-IRIS publishes no JSON Schema. Field names transcribe iris-web v2.4.29 (commit 340ce04080806a83837b713d01ea70632ee2b3f7, LGPL-3.0): the Alert columns in source/app/models/alerts.py, the Ioc and CaseAssets columns in source/app/models/models.py, and the required fields of IocSchema and CaseAssetsSchema in source/app/schema/marshables.py. Id ranges are the defaults source/app/post_init.py seeds on a fresh install: severities 1 to 6, alert statuses 1 to 8, TLP 1 to 5, 167 IOC types, 9 asset types. Server-set columns (alert_id, alert_uuid, alert_creation_time, alert_owner_id, modification_history) are rejected.",
+  "type": "object",
+  "required": ["alert_title", "alert_severity_id", "alert_status_id", "alert_customer_id", "alert_source_event_time"],
+  "additionalProperties": false,
+  "properties": {
+    "alert_title": { "type": "string", "minLength": 1 },
+    "alert_description": { "type": "string" },
+    "alert_source": { "type": "string" },
+    "alert_source_ref": { "type": "string" },
+    "alert_source_link": { "type": "string" },
+    "alert_source_content": {},
+    "alert_severity_id": { "type": "integer", "minimum": 1, "maximum": 6 },
+    "alert_status_id": { "type": "integer", "minimum": 1, "maximum": 8 },
+    "alert_context": { "type": "object" },
+    "alert_source_event_time": { "type": "string", "format": "date-time" },
+    "alert_note": { "type": "string" },
+    "alert_tags": { "type": "string", "$comment": "comma-separated; AlertSchema.verify_data splits it on commas" },
+    "alert_customer_id": { "type": "integer", "minimum": 1 },
+    "alert_classification_id": { "type": "integer", "minimum": 1 },
+    "alert_resolution_status_id": { "type": "integer", "minimum": 1 },
+    "alert_iocs": { "type": "array", "items": { "$ref": "#/$defs/ioc" } },
+    "alert_assets": { "type": "array", "items": { "$ref": "#/$defs/asset" } }
+  },
+  "$defs": {
+    "ioc": {
+      "type": "object",
+      "required": ["ioc_value", "ioc_type_id", "ioc_tlp_id"],
+      "additionalProperties": false,
+      "properties": {
+        "ioc_value": { "type": "string", "minLength": 1 },
+        "ioc_type_id": { "type": "integer", "minimum": 1, "maximum": 167 },
+        "ioc_description": { "type": "string" },
+        "ioc_tags": { "type": "string", "maxLength": 512 },
+        "ioc_tlp_id": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "ioc_enrichment": { "type": "object" },
+        "custom_attributes": { "type": "object" }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "required": ["asset_name", "asset_type_id"],
+      "additionalProperties": false,
+      "properties": {
+        "asset_name": { "type": "string", "minLength": 1 },
+        "asset_description": { "type": "string" },
+        "asset_domain": { "type": "string" },
+        "asset_ip": { "type": "string" },
+        "asset_info": { "type": "string" },
+        "asset_compromise_status_id": { "type": "integer" },
+        "asset_type_id": { "type": "integer", "minimum": 1, "maximum": 9 },
+        "asset_tags": { "type": "string" },
+        "analysis_status_id": { "type": "integer" },
+        "asset_enrichment": { "type": "object" },
+        "custom_attributes": { "type": "object" }
+      }
+    }
+  }
+}

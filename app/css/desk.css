@@ -87,6 +87,7 @@
 .sd table.ev td.mono { font-size: 12px; }
 .sd .srcb { display: inline-block; font-size: 10.5px; font-weight: 700; border-radius: 4px; padding: 0 5px; color: #fff; white-space: nowrap; }
 .sd .src-edr { background: #6941c6; } .sd .src-sse { background: #0e7490; } .sd .src-waf { background: #c2410c; } .sd .src-idp { background: #1d4ed8; } .sd .src-cloud { background: #a16207; }
+.sd .src-signin { background: #1e40af; } .sd .src-entraaudit { background: #4338ca; } .sd .src-o365 { background: #be185d; } .sd .src-email { background: #15803d; }
 .sd .raw { background: #f8fafc; border: 2px solid var(--line); border-radius: 8px; padding: 8px; font-size: 11.5px; white-space: pre-wrap; overflow-wrap: break-word; margin-top: 4px; font-family: var(--mono); }
 .sd .tablewrap { overflow-x: auto; }
 
